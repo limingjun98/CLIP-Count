@@ -104,6 +104,7 @@ def get_args_parser():
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
     parser.set_defaults(pin_mem=True)
 
+
     # log related
     parser.add_argument('--log_dir', default='./out',
                         help='path where to tensorboard log')

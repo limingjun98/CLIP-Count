@@ -1,0 +1,1 @@
+python run.py --mode train --exp_name exp --batch_size 32 > train231207_15_13.log 2>&1; /usr/bin/shutdown

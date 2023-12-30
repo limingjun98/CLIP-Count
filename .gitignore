@@ -18,11 +18,14 @@ debug/
 *.jpg
 *.gif
 *.bmp
+*.0
+*.log
 
 # *.pkl
 *.npy
 *.npz
 *.tar.gz
+*.tar
 *.zip
 *.pth
 

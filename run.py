@@ -485,7 +485,7 @@ if __name__ == '__main__':
         elif args.dataset_type == "CARPK":
             dataset_val = dataset_test = CARPK(None, split="test")
         elif args.dataset_type == "ShanghaiTech":
-            dataset_val = dataset_test = ShanghaiTech(None, split="test", part = "B")
+            dataset_val = dataset_test = ShanghaiTech(None, split="test", part = "A")
 
 
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)

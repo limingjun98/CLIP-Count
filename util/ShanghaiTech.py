@@ -52,11 +52,15 @@ class ShanghaiTech(Dataset):
 
             assert os.path.exists(os.path.join(self.im_dir, f"{im_name}.jpg"))
             assert os.path.exists(os.path.join(self.anno_path, f"GT_{im_name}.mat"))
-            with open(os.path.join(self.anno_path, f"GT_{im_name}.mat"), "rb") as f:
-                # mat = sp.io.loadmat(f)
-                mat = io.load(f) # the sub package of scipy has been changed, the above code needs to be commented
-                # the number of count is lenth of the points
-                self.gt_cnt[im_name] = len(mat["image_info"][0][0][0][0][0])      
+
+            # the sub package of scipy has been changed, the above code needs to be commented
+            # with open(os.path.join(self.anno_path, f"GT_{im_name}.mat"), "rb") as f:
+            #     mat = sp.io.loadmat(f)
+            #     # the number of count is lenth of the points
+            #     self.gt_cnt[im_name] = len(mat["image_info"][0][0][0][0][0])
+
+            mat = io.loadmat(os.path.join(self.anno_path, f"GT_{im_name}.mat"))
+            self.gt_cnt[im_name] = len(mat["image_info"][0][0][0][0][0])
         # resize the image height to 384, keep the aspect ratio
         self.preprocess = transforms.Compose([
             transforms.Resize(384), 

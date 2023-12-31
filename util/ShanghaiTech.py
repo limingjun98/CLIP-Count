@@ -33,8 +33,13 @@ class ShanghaiTech(Dataset):
         assert split in ['train', 'test']
         assert part in ['A', 'B']
 
+        if not data_dir:
+            data_dir = "data/ShanghaiTech/part_{}/{}_data"
+
         #!HARDCODED Dec 25: 
-        self.data_dir = "data/ShanghaiTech/part_{}/{}_data".format(part, split)
+        self.data_dir = data_dir.format(part, split)
+
+
 
         self.resize_val = resize_val
         self.im_dir = os.path.join(self.data_dir,'images')
@@ -46,7 +51,7 @@ class ShanghaiTech(Dataset):
         # with open(self.split_file,"r") as s:
         #     img_names = s.readlines()
         self.img_paths = gb.glob(os.path.join(self.im_dir, "*.jpg"))
-        self.img_names = [p.split("/")[-1].split(".")[0] for p in self.img_paths]
+        self.img_names = [p.replace('\\', '/').split("/")[-1].split(".")[0] for p in self.img_paths]
         self.gt_cnt = {}
         for im_name in self.img_names:
 
@@ -91,7 +96,8 @@ class ShanghaiTech(Dataset):
 
 #test
 if __name__ == "__main__":
-    dataset = ShanghaiTech(None,split="train",part="A")
+    dataset = ShanghaiTech("E:/experiment/CLIP-Count/data/ShanghaiTech/part_{}/{}_data", split="train", part="A")
+    # dataset = ShanghaiTech(None, split="train", part="A")
     # sample one image
     img, cnt = dataset[0]
     #save image

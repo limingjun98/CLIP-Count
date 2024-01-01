@@ -20,7 +20,8 @@ IM_NORM_STD = [0.229, 0.224, 0.225]
 
 
 class ShanghaiTech(Dataset):
-    def __init__(self, data_dir:str, split:str, part:str, resize_val:bool=True):
+    def __init__(self, data_dir:str, split:str, part:str, resize_val:bool=True,
+                 preserve_the_original_image: bool = False):
         """
         Parameters
         ----------
@@ -57,22 +58,21 @@ class ShanghaiTech(Dataset):
 
             assert os.path.exists(os.path.join(self.im_dir, f"{im_name}.jpg"))
             assert os.path.exists(os.path.join(self.anno_path, f"GT_{im_name}.mat"))
-
             # the sub package of scipy has been changed, the above code needs to be commented
             # with open(os.path.join(self.anno_path, f"GT_{im_name}.mat"), "rb") as f:
             #     mat = sp.io.loadmat(f)
-            #     # the number of count is lenth of the points
+            #     # the number of count is length of the points
             #     self.gt_cnt[im_name] = len(mat["image_info"][0][0][0][0][0])
 
             mat = io.loadmat(os.path.join(self.anno_path, f"GT_{im_name}.mat"))
+            # the number of count is length of the points
             self.gt_cnt[im_name] = len(mat["image_info"][0][0][0][0][0])
         # resize the image height to 384, keep the aspect ratio
         self.preprocess = transforms.Compose([
             transforms.Resize(384), 
             transforms.ToTensor(),
-        ]
-        )
-            
+        ])
+        self.preserve_the_original_image = preserve_the_original_image
 
 
     def __len__(self):
@@ -88,18 +88,27 @@ class ShanghaiTech(Dataset):
         # if the image is grayscale, convert it to RGB
         if img.mode != "RGB":
             img = img.convert("RGB")
+
+        # create an image conversion operation -lmj
+        to_tensor = transforms.ToTensor()
+        origin_img_tensor = to_tensor(img)
+
         img = self.preprocess(img)
         gt_cnt = self.gt_cnt[im_name]
 
-        return img, gt_cnt
+        if self.preserve_the_original_image:
+            return img, gt_cnt, origin_img_tensor
+        else:
+            return img, gt_cnt
     
 
 #test
 if __name__ == "__main__":
-    dataset = ShanghaiTech("E:/experiment/CLIP-Count/data/ShanghaiTech/part_{}/{}_data", split="train", part="A")
+    dataset = ShanghaiTech("E:/experiment/CLIP-Count/data/ShanghaiTech/part_{}/{}_data", split="train", part="A",
+                           preserve_the_original_image=True)
     # dataset = ShanghaiTech(None, split="train", part="A")
     # sample one image
-    img, cnt = dataset[0]
+    img, cnt, origin_img_tensor = dataset[0]
     #save image
     img = img.permute(1,2,0).numpy()*255
     print(img.shape)

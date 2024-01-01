@@ -20,6 +20,9 @@ import argparse
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
+import torchvision.transforms as transforms
+from PIL import Image
 from torch._six import inf
 import numpy as np
 import random
@@ -399,6 +402,48 @@ def seed_all(seed = 42):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.enabled = False
 
+def sliding_window_origin_image(image, window_size = (1536, 1536), stride = 512):
+    """
+    Split an origin image into overlapping patches.
+    Args:
+        image: [1, 3, H, W], W >= H, Tensor, the length of the first dimension needs to be 1 because function interpolate requires this tensor to have dimension 4
+        window_size: (1536, 1536)
+        stride: 512
+    Returns:
+        patches: [N, 3, 1536, 1536]
+        intervals: [[start, end], [start, end], ...]
+    """
+    # resize the image height to 1536, keep the aspect ratio
+    image_w, image_h = image.shape[3], image.shape[2]
+    interpolate_height = 384 * 4
+    interpolate_weight = round(interpolate_height * image_w / image_h)
+    image = F.interpolate(image, size = (interpolate_height, interpolate_weight), mode = 'bilinear', align_corners = False)
+    if isinstance(image, torch.Tensor):
+        if image.shape[0] == 1:
+            image = image.squeeze(0)
+        image = image.permute(1, 2, 0)
+        image = image.detach().cpu().numpy()
+    padding_width = (stride - image.shape[1] % stride) % stride
+    image = np.pad(image, ((0, 0), (0, padding_width), (0, 0)), 'constant')
+    h, w, _ = image.shape
+    assert h == interpolate_height, "resized image height is 1536."
+    patches = []
+    intervals = []
+    mini_patches = []  # crop the image into 4*4 pieces
+    for i in range(0, w - window_size[1] + 1, stride):
+        patch = image[:, i:i + window_size[1], :]
+        patches.append(patch)
+        intervals.append([i, i + window_size[1]])
+        pieces_list = []
+        for j in range(4):
+            for k in range(4):
+                piece = patch[384*j:384*(j+1), 384*k:384*(k+1), :]
+                pieces_list.append(piece)
+        pieces_list = np.array(pieces_list).transpose(0,3,1,2)
+        mini_patches.append(pieces_list)
+    return np.array(patches).transpose(0,3,1,2), np.array(intervals), mini_patches
+
+
 def sliding_window(image, window_size = (384, 384), stride = 128):
     """
     Split an image into overlapping patches.
@@ -416,7 +461,7 @@ def sliding_window(image, window_size = (384, 384), stride = 128):
             image = image.squeeze(0)
         image = image.permute(1, 2, 0)
         image = image.detach().cpu().numpy()
-    image = np.pad(image, ((0, 0), (0, stride - image.shape[1] % stride), (0, 0)), 'constant')
+    image = np.pad(image, ((0, 0), (0, (stride - image.shape[1] % stride) % stride), (0, 0)), 'constant')
     h, w, _ = image.shape
     assert h == 384, "FSC-147 assume image height is 384."
     patches = []
@@ -511,6 +556,8 @@ def str2bool(v):
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
 if __name__ == '__main__':
+    '''
+    
     # test_img = "/workspace/songrise/CounTR/data/images_384_VarV2/7500.jpg"
     # img = cv2.imread(test_img)
     # img = np.random.randint(0,255,size=(384, 1093, 3))
@@ -527,3 +574,29 @@ if __name__ == '__main__':
     # img_rec = img_rec[:, :orig_shape[1], :]
     # print(np.mean(img_rec - img))
     cv2.imwrite("test.jpg", img_rec)
+    '''
+
+    im_path = 'E:/experiment/CLIP-Count/data/ShanghaiTech/part_A/train_data/images/IMG_1.jpg'
+    img = Image.open(im_path)
+    # if the image height larger than width, rotate it
+    if img.size[0] < img.size[1]:
+        img = img.rotate(90, expand=True)
+    # if the image is grayscale, convert it to RGB
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    # create an image conversion operation -lmj
+    to_tensor = transforms.ToTensor()
+    origin_img_tensor = to_tensor(img)
+    origin_img_tensor = origin_img_tensor.unsqueeze(0)
+    slides, _, mini_patches = sliding_window_origin_image(origin_img_tensor)
+    # patches = torch.from_numpy(patches).float().cpu()
+    for i, slide in enumerate(slides):
+        # patch = patch.permute(1,2,0)
+        slide = slide.transpose(1, 2, 0)
+        slide = slide * 255
+        Image.fromarray(slide.astype(np.uint8)).save(f"test_{i}.png")
+    for i, pieces_list in enumerate(mini_patches):
+        for j, piece in enumerate(pieces_list):
+            piece = piece.transpose(1, 2, 0)
+            piece = piece * 255
+            Image.fromarray(piece.astype(np.uint8)).save(f"test_{i}_row{j//4}_col{j%4}.png")

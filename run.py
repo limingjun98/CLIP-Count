@@ -133,6 +133,9 @@ class Model(LightningModule):
         super().__init__()
         self.args = args
 
+        if not self.args.use_self_supervised:
+            self.args.self_supervised_epoch = 0
+
         # if args is a dictionary, convert to Namespace
         if self.args is not None and type(self.args) is dict:
             self.args = argparse.Namespace(**self.args)
@@ -156,8 +159,6 @@ class Model(LightningModule):
         self.contrastive_loss = ContrastiveLoss(0.07,self.args.noise_text_ratio, self.args.normalize_contrast)
         self.neg_prompt_embed = None
 
-        if not self.args.use_self_supervised:
-            self.args.self_supervised_epoch = 0
 
     def training_step(self, batch, batch_idx):
 

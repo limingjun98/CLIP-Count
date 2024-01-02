@@ -482,7 +482,7 @@ if __name__ == '__main__':
         check_val_every_n_epoch=args.val_freq,
     )
     if args.mode == "train":
-        if args.ckpt is not None and (not args.resume_checkpoint):
+        if args.ckpt is not None:
             model = Model.load_from_checkpoint(args.ckpt, strict=False)
         if args.resume_checkpoint:
             # automatically restores model, epoch, step, LR schedulers, apex, etc...

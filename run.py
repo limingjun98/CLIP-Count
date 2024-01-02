@@ -74,7 +74,15 @@ def get_args_parser():
     parser.add_argument('--normalize_contrast',default=False, type = misc.str2bool, help = "whether to normalize contrastive loss")
     parser.add_argument('--contrast_pos', default = "pre", choices = ["pre", "post"], type = str, help = "Use contrastive loss before or after the interaction")
     parser.add_argument('--contrast_pre_epoch', default = 20, type = int, help = "how many epoch to use contrastive pretraining")
-    
+
+    # self supervise loss related -lmj
+    parser.add_argument('--use_self_supervised', default=False, type=misc.str2bool,
+                        help = "whether to use self supervised")
+    parser.add_argument('--self_supervised_epoch', default = 0, type = int,
+                        help = "how many epoch to use self supervised loss finetuned")
+    parser.add_argument('--resume_checkpoint', default=False, type=misc.str2bool,
+                        help="whether to resume checkpoint.If resuming from mid-epoch checkpoint, training will start from the beginning of the next epoch")
+
     # Optimizer parameters
     parser.add_argument('--weight_decay', type=float, default=0.05,
                         help='weight decay (default: 0.05)')
@@ -147,6 +155,9 @@ class Model(LightningModule):
         self.loss = F.mse_loss
         self.contrastive_loss = ContrastiveLoss(0.07,self.args.noise_text_ratio, self.args.normalize_contrast)
         self.neg_prompt_embed = None
+
+        if not self.args.use_self_supervised:
+            self.args.self_supervised_epoch = 0
 
     def training_step(self, batch, batch_idx):
 
@@ -465,15 +476,18 @@ if __name__ == '__main__':
         callbacks=[save_callback],
         accumulate_grad_batches = args.accum_iter, 
         precision=16, 
-        max_epochs=args.epochs+args.contrast_pre_epoch,
+        max_epochs=args.epochs+args.contrast_pre_epoch+args.self_supervised_epoch,
         logger=logger,
         check_val_every_n_epoch=args.val_freq,
     )
     if args.mode == "train":
         if args.ckpt is not None:
             model = Model.load_from_checkpoint(args.ckpt, strict=False)
-
-        trainer.fit(model, train_dataloader, val_dataloader)
+        if args.resume_checkpoint:
+            # automatically restores model, epoch, step, LR schedulers, apex, etc...
+            trainer.fit(model, train_dataloader, val_dataloader)
+        else:
+            trainer.fit(model, train_dataloader, val_dataloader, ckpt_path=args.ckpt)
     elif args.mode == "test":
         if args.dataset_type == "FSC":
             dataset_val = FSC147(split = "val", resize_val=False)

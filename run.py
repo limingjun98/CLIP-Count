@@ -485,9 +485,9 @@ if __name__ == '__main__':
             model = Model.load_from_checkpoint(args.ckpt, strict=False)
         if args.resume_checkpoint:
             # automatically restores model, epoch, step, LR schedulers, apex, etc...
-            trainer.fit(model, train_dataloader, val_dataloader)
-        else:
             trainer.fit(model, train_dataloader, val_dataloader, ckpt_path=args.ckpt)
+        else:
+            trainer.fit(model, train_dataloader, val_dataloader)
     elif args.mode == "test":
         if args.dataset_type == "FSC":
             dataset_val = FSC147(split = "val", resize_val=False)

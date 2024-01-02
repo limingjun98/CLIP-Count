@@ -480,15 +480,13 @@ if __name__ == '__main__':
         max_epochs=args.epochs+args.contrast_pre_epoch+args.self_supervised_epoch,
         logger=logger,
         check_val_every_n_epoch=args.val_freq,
+        resume_from_checkpoint=args.ckpt
     )
     if args.mode == "train":
         if args.ckpt is not None:
             model = Model.load_from_checkpoint(args.ckpt, strict=False)
-        if args.resume_checkpoint:
-            # automatically restores model, epoch, step, LR schedulers, apex, etc...
-            trainer.fit(model, train_dataloader, val_dataloader, ckpt_path=args.ckpt)
-        else:
-            trainer.fit(model, train_dataloader, val_dataloader)
+
+        trainer.fit(model, train_dataloader, val_dataloader)
     elif args.mode == "test":
         if args.dataset_type == "FSC":
             dataset_val = FSC147(split = "val", resize_val=False)

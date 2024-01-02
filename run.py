@@ -486,7 +486,7 @@ if __name__ == '__main__':
             model = Model.load_from_checkpoint(args.ckpt, strict=False)
         if args.resume_checkpoint:
             # automatically restores model, epoch, step, LR schedulers, apex, etc...
-            trainer.fit(model, train_dataloader, val_dataloader, ckpt_path=args.ckpt)
+            trainer.fit(model, train_dataloader, val_dataloader, ckpt_path='last')
         else:
             trainer.fit(model, train_dataloader, val_dataloader)
     elif args.mode == "test":

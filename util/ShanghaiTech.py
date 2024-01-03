@@ -6,15 +6,18 @@
 # @Description: shanghai tech dataset
 import numpy as np
 from torchvision import transforms
-
+import scipy.ndimage as ndimage
 import torchvision.transforms as transforms
 import torchvision.transforms.functional as TF
 from PIL import Image
+import torch
 from torch.utils.data import Dataset
 import os
 import scipy as sp
+import einops
 from scipy import io
 import glob as gb
+import cv2
 IM_NORM_MEAN = [0.485, 0.456, 0.406]
 IM_NORM_STD = [0.229, 0.224, 0.225]
 
@@ -66,7 +69,8 @@ class ShanghaiTech(Dataset):
 
             mat = io.loadmat(os.path.join(self.anno_path, f"GT_{im_name}.mat"))
             # the number of count is length of the points
-            self.gt_cnt[im_name] = len(mat["image_info"][0][0][0][0][0])
+            points_ndarray = mat["image_info"][0][0][0][0][0]
+            self.gt_cnt[im_name] = len(points_ndarray)
         # resize the image height to 384, keep the aspect ratio
         self.preprocess = transforms.Compose([
             transforms.Resize(384), 
@@ -83,11 +87,16 @@ class ShanghaiTech(Dataset):
         im_path = os.path.join(self.im_dir, f"{im_name}.jpg")
         img = Image.open(im_path)
         # if the image height larger than width, rotate it
-        if img.size[0] < img.size[1]:
+        img_width, img_height = img.size[0], img.size[1]
+        whether_rotate = False
+        if img_width < img_height:
             img = img.rotate(90, expand=True)
+            img_width, img_height = img_height, img_width
+            whether_rotate = True
         # if the image is grayscale, convert it to RGB
         if img.mode != "RGB":
             img = img.convert("RGB")
+
 
         # create an image conversion operation -lmj
         to_tensor = transforms.ToTensor()
@@ -97,7 +106,20 @@ class ShanghaiTech(Dataset):
         gt_cnt = self.gt_cnt[im_name]
 
         if self.preserve_the_original_image:
-            return img, gt_cnt, origin_img_tensor
+            # create groundTruth
+            mat = io.loadmat(os.path.join(self.anno_path, f"GT_{im_name}.mat"))
+            points_ndarray = mat["image_info"][0][0][0][0][0]
+            # gt_density = torch.zeros(img_height, img_width)
+            gt_density = np.zeros([img_height, img_width], dtype='float32')
+            for keypoint in points_ndarray:
+                if whether_rotate:
+                    gt_density[round(keypoint[0]), round(keypoint[1])] = 1.
+                else:
+                    gt_density[round(keypoint[1]), round(keypoint[0])] = 1.
+            gt_density = ndimage.gaussian_filter(gt_density, sigma=(1, 1), order=0)
+            gt_density = torch.from_numpy(gt_density)
+            gt_density = gt_density * 60
+            return img, gt_cnt, origin_img_tensor, gt_density
         else:
             return img, gt_cnt
     
@@ -108,7 +130,21 @@ if __name__ == "__main__":
                            preserve_the_original_image=True)
     # dataset = ShanghaiTech(None, split="train", part="A")
     # sample one image
-    img, cnt, origin_img_tensor = dataset[0]
+    img, cnt, origin_img_tensor, gt_density = dataset[0]
+
+    gt_density = gt_density.detach().cpu().numpy()
+    gt_density = einops.repeat(gt_density, 'h w -> c h w', c=3)
+    gt_density = gt_density / gt_density.max()  # normalize
+    gt_density_write = 1. - gt_density[0]
+    gt_density_write = cv2.applyColorMap(np.uint8(255 * gt_density_write), cv2.COLORMAP_JET)
+    gt_density_img = Image.fromarray(np.uint8(gt_density_write))
+    gt_density_img.save("test_gt_density.png")
+
+    gt_density_write = gt_density_write / 255.
+    overlay_write = 0.33 * np.transpose(origin_img_tensor, (1, 2, 0)) + 0.67 * gt_density_write
+    overlay_img = Image.fromarray(np.uint8(255 * overlay_write))
+    overlay_img.save("overlay_gt_density.png")
+
     #save image
     img = img.permute(1,2,0).numpy()*255
     print(img.shape)

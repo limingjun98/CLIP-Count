@@ -24,7 +24,7 @@ IM_NORM_STD = [0.229, 0.224, 0.225]
 
 class ShanghaiTech(Dataset):
     def __init__(self, data_dir:str, split:str, part:str, resize_val:bool=True,
-                 preserve_the_original_image: bool = False):
+                 preserve_the_original_image: bool = False, preserve_image_name: bool = False, preserve_all: bool = False):
         """
         Parameters
         ----------
@@ -77,6 +77,8 @@ class ShanghaiTech(Dataset):
             transforms.ToTensor(),
         ])
         self.preserve_the_original_image = preserve_the_original_image
+        self.preserve_image_name = preserve_image_name
+        self.preserve_all = preserve_all
 
 
     def __len__(self):
@@ -100,12 +102,13 @@ class ShanghaiTech(Dataset):
 
         # create an image conversion operation -lmj
         to_tensor = transforms.ToTensor()
+        # Save the original scale image without compression（but we let the width bigger than height） -lmj
         origin_img_tensor = to_tensor(img)
 
         img = self.preprocess(img)
         gt_cnt = self.gt_cnt[im_name]
 
-        if self.preserve_the_original_image:
+        if self.preserve_all:
             # create groundTruth
             mat = io.loadmat(os.path.join(self.anno_path, f"GT_{im_name}.mat"))
             points_ndarray = mat["image_info"][0][0][0][0][0]
@@ -113,40 +116,48 @@ class ShanghaiTech(Dataset):
             gt_density = np.zeros([img_height, img_width], dtype='float32')
             for keypoint in points_ndarray:
                 if whether_rotate:
-                    gt_density[round(keypoint[0]), round(keypoint[1])] = 1.
+                    gt_density[int(keypoint[0]), int(keypoint[1])] = 1.
                 else:
-                    gt_density[round(keypoint[1]), round(keypoint[0])] = 1.
+                    gt_density[int(keypoint[1]), int(keypoint[0])] = 1.
             gt_density = ndimage.gaussian_filter(gt_density, sigma=(1, 1), order=0)
             gt_density = torch.from_numpy(gt_density)
             gt_density = gt_density * 60
-            return img, gt_cnt, origin_img_tensor, gt_density
+            return img, gt_cnt, origin_img_tensor, gt_density, im_name
         else:
-            return img, gt_cnt
+            if self.preserve_the_original_image:
+                return img, gt_cnt, origin_img_tensor, im_name
+            elif self.preserve_image_name:
+                return img, gt_cnt, im_name
+            else:
+                return img, gt_cnt
     
 
 #test
 if __name__ == "__main__":
-    dataset = ShanghaiTech("E:/experiment/CLIP-Count/data/ShanghaiTech/part_{}/{}_data", split="train", part="A",
-                           preserve_the_original_image=True)
+    dataset = ShanghaiTech("E:/experiment/CLIP-Count/data/ShanghaiTech/part_{}/{}_data", split="test", part="A",
+                           preserve_all=True)
     # dataset = ShanghaiTech(None, split="train", part="A")
-    # sample one image
-    img, cnt, origin_img_tensor, gt_density = dataset[0]
+    for i in range(len(dataset)):
+        img, cnt, origin_img_tensor, gt_density, im_name = dataset[i]
 
-    gt_density = gt_density.detach().cpu().numpy()
-    gt_density = einops.repeat(gt_density, 'h w -> c h w', c=3)
-    gt_density = gt_density / gt_density.max()  # normalize
-    gt_density_write = 1. - gt_density[0]
-    gt_density_write = cv2.applyColorMap(np.uint8(255 * gt_density_write), cv2.COLORMAP_JET)
-    gt_density_img = Image.fromarray(np.uint8(gt_density_write))
-    gt_density_img.save("test_gt_density.png")
+        gt_density = gt_density.detach().cpu().numpy()
+        gt_density = einops.repeat(gt_density, 'h w -> c h w', c=3)
+        gt_density = gt_density / gt_density.max()  # normalize
+        gt_density_write = 1. - gt_density[0]
+        gt_density_write = cv2.applyColorMap(np.uint8(255 * gt_density_write), cv2.COLORMAP_JET)
+        # gt_density_img = Image.fromarray(np.uint8(gt_density_write))
+        # gt_density_img.save("test_gt_density.png")
 
-    gt_density_write = gt_density_write / 255.
-    overlay_write = 0.33 * np.transpose(origin_img_tensor, (1, 2, 0)) + 0.67 * gt_density_write
-    overlay_img = Image.fromarray(np.uint8(255 * overlay_write))
-    overlay_img.save("overlay_gt_density.png")
+        gt_density_write = gt_density_write / 255.
+        overlay_write = 0.33 * np.transpose(origin_img_tensor, (1, 2, 0)) + 0.67 * gt_density_write
+        overlay_img = Image.fromarray(np.uint8(255 * overlay_write))
+        overlay_img.save(f"{im_name}_overlay_gt_density.png")
+        print(f'{im_name} ok')
 
-    #save image
-    img = img.permute(1,2,0).numpy()*255
-    print(img.shape)
-    print(cnt)
-    Image.fromarray(img.astype(np.uint8)).save("test.png")
+        '''
+        #save image
+        img = img.permute(1,2,0).numpy()*255
+        print(img.shape)
+        print(cnt)
+        Image.fromarray(img.astype(np.uint8)).save("test.png")
+        '''

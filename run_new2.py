@@ -19,7 +19,7 @@ from models.contrastive_loss import ContrastiveLoss
 import torch
 import torch.nn.functional as F
 from typing import List, Dict, Any
-
+import clip
 
 import util.misc as misc
 from util.FSC147 import  FSC147
@@ -39,7 +39,7 @@ os.environ["CUDA_LAUNCH_BLOCKING"] = '1'
 
 def get_args_parser():
     parser = argparse.ArgumentParser('CLIP-Count', add_help=False)
-    parser.add_argument("--mode",type = str, default = "train", choices = ["train", "test", "app"], help = "train or test or an interactive application")
+    parser.add_argument("--mode",type = str, default = "test", choices = ["train", "test", "app"], help = "train or test or an interactive application")
     parser.add_argument("--exp_name",type = str, default = "exp", help = "experiment name")
     parser.add_argument('--batch_size', default=32, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
@@ -95,15 +95,17 @@ def get_args_parser():
     # Dataset parameters
     parser.add_argument('--data_path', default='./data/', type=str,
                         help='dataset path')
-    parser.add_argument('--dataset_type', default="FSC", type = str, choices=["FSC","CARPK", "COCO", "ShanghaiTech"])
+    parser.add_argument('--dataset_type', default="ShanghaiTech", type = str, choices=["FSC","CARPK", "COCO", "ShanghaiTech"])
 
     parser.add_argument('--output_dir', default='./out',
                         help='path where to save, empty for no saving')
     parser.add_argument('--seed', default=1, type=int)
 
 
-    parser.add_argument('--ckpt', default=None, type = str,
+    parser.add_argument('--ckpt', default='epoch=209-val_mae=16.60.ckpt', type = str,
                         help='path of resume from checkpoint')
+    # parser.add_argument('--ckpt', default=None, type=str,
+    #                     help='path of resume from checkpoint')
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--num_workers', default=0, type=int)
@@ -116,7 +118,7 @@ def get_args_parser():
     # log related
     parser.add_argument('--log_dir', default='./out',
                         help='path where to tensorboard log')
-    parser.add_argument('--log_test_img', default=False, type=bool, help="whehter to log overlaied density map when validation and testing.")
+    parser.add_argument('--log_test_img', default=True, type=bool, help="whehter to log overlaied density map when validation and testing.")
     parser.add_argument('--dont_log', action='store_true', help='do not log to tensorboard')
     parser.add_argument('--val_freq', default=1, type=int, help='check validation every val_freq epochs')
 
@@ -292,25 +294,110 @@ class Model(LightningModule):
             prompt = ["car" for _ in range(image.shape[0])]
             gt_density = torch.zeros(image.shape[0], image.shape[2], image.shape[3]) 
         elif self.args.dataset_type == "ShanghaiTech":
-            image, gt_cnt, im_name = batch
+            image, gt_cnt, origin_img_tensor, im_name = batch
             gt_cnt = gt_cnt.item()
             prompt = ["people" for _ in range(image.shape[0])]
-            gt_density = torch.zeros(image.shape[0], image.shape[2], image.shape[3]) 
+            gt_density = torch.zeros(image.shape[0], image.shape[2], image.shape[3])
 
 
         assert image.shape[0] == 1 , "only support inference one image at a time"
         raw_h, raw_w = image.shape[2:]
 
-        patches, _ = misc.sliding_window(image,stride=128)
-        #covert to batch
-        patches = torch.from_numpy(patches).float().to(self.device)
-        prompt = np.repeat(prompt, patches.shape[0], axis=0)
-        output = self.model(patches, prompt)
-        output.unsqueeze_(1)
-        output = misc.window_composite(output, stride=128)
-        output = output.squeeze(1)
-        #crop to original width
-        output = output[:, :, :raw_w]
+        if 1==1:
+            # composite mini-batch
+            # origin_img_tensor = origin_img_tensor.unsqueeze(0)
+            slides, _, mini_patches = misc.sliding_window_origin_image(origin_img_tensor)
+
+            slides = torch.from_numpy(slides).float().to(self.device)  # [N, 3, 384, 384]
+            prompt_big_img = np.repeat(prompt, slides.shape[0], axis=0)
+            output_big_img = self.model(slides, prompt_big_img) # [N, 384, 384]
+
+            mini_patches = torch.from_numpy(mini_patches).float().to(self.device)
+            avg_pooling = torch.nn.AvgPool2d(2)
+            output = []
+            prompt = np.repeat(prompt, mini_patches.shape[1], axis=0)
+            # n slice. n = mini_patches.shape[0]
+            for i in range(mini_patches.shape[0]):  # [N, 16, 3, 384, 384]
+                mini_patch_output, extra_out = self.model(mini_patches[i], prompt, return_extra = True)  # [16, 384, 384]
+                img_embedding = extra_out['x_cls']  # [16, 1, 512]
+                classify_prompt = ['heads','background','tree','leaves','sky','building']
+                classify_prompt = [f"a photo of {p}" for p in classify_prompt]
+                text_token = clip.tokenize(classify_prompt).to(image.device)
+                with torch.no_grad():
+                    text_embedding = self.model.text_encoder_classfiy(text_token).float() # [6, 1, 512]
+                text_embedding.squeeze_(1) # [6, 512]
+                # for index in range(4):
+                #     print(f'{index}: ',text_embedding[index].detach().equal(text_embedding[index+1].detach()))
+                text_embedding.unsqueeze_(0)  # [1, 6, 512]
+                # [16, 1, 512] and [1, 6, 512] => [16, 6]
+                sim_map = F.cosine_similarity(img_embedding, text_embedding, dim=-1)  # [16, 6]
+                sim_map_max_index = sim_map.argmax(dim=1) # [16]
+
+                pool_tensor_list = []
+                for j in range(mini_patch_output.shape[0]):
+                    # torch.sum(output[0] / SCALE_FACTOR).item()
+                    mini_patch_pool_tensor = mini_patch_output[j].detach().unsqueeze(0)
+                    mini_patch_pool_tensor = avg_pooling(mini_patch_pool_tensor) * 4
+                    mini_patch_pool_tensor = avg_pooling(mini_patch_pool_tensor) * 4
+                    mini_patch_pool_tensor.squeeze_(0)  # [96, 96]
+                    bigimg_crop_pool_tensor = output_big_img[i, (j // 4) * 96:(j // 4 + 1) * 96,
+                                          (j % 4) * 96:(j % 4 + 1) * 96].detach().clone()
+                    mini_patch_cnt = torch.sum(mini_patch_pool_tensor / SCALE_FACTOR).item()
+                    bigimg_crop_cnt = torch.sum(bigimg_crop_pool_tensor / SCALE_FACTOR).item()
+                    # the classify result of the small pieces is the head
+                    if sim_map_max_index[j] == 0 and 2.5 < mini_patch_cnt/bigimg_crop_cnt:
+                        pool_tensor = mini_patch_pool_tensor
+                    else:
+                        pool_tensor = bigimg_crop_pool_tensor
+                    pool_tensor_list.append(pool_tensor)
+                # concat all patches
+                results = []
+                for i_ in range(4):
+                    result = torch.cat(pool_tensor_list[i_*4:i_*4+4], 1)
+                    results.append(result)
+                results = torch.cat(results, 0) # [384, 384]
+                output.append(results.unsqueeze(0)) # [1, 384, 384]
+            # output = torch.Tensor(output)
+            output = torch.cat(output, 0) # [N, 384, 384]
+        elif 1==2:
+            # composite mini-batch
+            # origin_img_tensor = origin_img_tensor.unsqueeze(0)
+            slides, _, mini_patches = misc.sliding_window_origin_image(origin_img_tensor)
+            mini_patches = torch.from_numpy(mini_patches).float().to(self.device)
+            avg_pooling = torch.nn.AvgPool2d(2)
+            output = []
+            prompt = np.repeat(prompt, mini_patches.shape[1], axis=0)
+            # n slice. n = mini_patches.shape[0]
+            for i in range(mini_patches.shape[0]):  # [N, 16, 3, 384, 384]
+                mini_patch_output = self.model(mini_patches[i], prompt)  # [16, 384, 384]
+                pool_tensor_list = []
+                for j in range(mini_patch_output.shape[0]):
+                    pool_tensor = mini_patch_output[j].detach().unsqueeze(0)
+                    pool_tensor = avg_pooling(pool_tensor) * 4
+                    pool_tensor = avg_pooling(pool_tensor) * 4
+                    pool_tensor.squeeze_(0) # [96, 96]
+                    pool_tensor_list.append(pool_tensor)
+                results = []
+                for i_ in range(4):
+                    result = torch.cat(pool_tensor_list[i_*4:i_*4+4], 1)
+                    results.append(result)
+                results = torch.cat(results, 0) # [384, 384]
+                output.append(results.unsqueeze(0)) # [1, 384, 384]
+            # output = torch.Tensor(output)
+            output = torch.cat(output, 0) # [N, 384, 384]
+        else:
+            patches, _ = misc.sliding_window(image, stride=128)
+            # covert to batch
+            patches = torch.from_numpy(patches).float().to(self.device) # [N, 3, 384, 384]
+            prompt = np.repeat(prompt, patches.shape[0], axis=0)
+            output = self.model(patches, prompt)
+
+        # Looks like adding a channel dimension
+        output.unsqueeze_(1) # [N, 1, 384, 384]
+        output = misc.window_composite(output, stride=128) # [1, 1, W+, 384]
+        output = output.squeeze(1) # [1, W+, 384]
+        # crop to original width
+        output = output[:, :, :raw_w] # [1, W, 384]
 
         # Update information of MAE and RMSE
         batch_mae = []
@@ -339,7 +426,9 @@ class Model(LightningModule):
 
 
         pred_density = einops.repeat(pred_density, 'h w -> c h w', c=3)
-        pred_density = pred_density / pred_density.max() #normalize
+        pred_density_max = pred_density.max()
+        tmp_sum = pred_density[0].sum()
+        # pred_density = pred_density / pred_density_max #normalize
         heatmap_pred = img_log 
         heatmap_pred = 0.33 * img_log + 0.67 * pred_density
         gt_density_log = einops.repeat(gt_density_log, 'h w -> c h w', c=3)
@@ -505,7 +594,7 @@ if __name__ == '__main__':
             dataset_val = dataset_test = CARPK(None, split="test")
         elif args.dataset_type == "ShanghaiTech":
             dataset_val = dataset_test = ShanghaiTech(None, split="test",
-                                                      part = "A", preserve_image_name=True)
+                                                      part = "A", preserve_the_original_image=True)
 
 
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)

@@ -412,6 +412,7 @@ def sliding_window_origin_image(image, window_size = (1536, 1536), stride = 512)
     Returns:
         patches: [N, 3, 1536, 1536]
         intervals: [[start, end], [start, end], ...]
+        mini_patches: [N, 16, 3, 384, 384]
     """
     # resize the image height to 1536, keep the aspect ratio
     image_w, image_h = image.shape[3], image.shape[2]
@@ -441,7 +442,7 @@ def sliding_window_origin_image(image, window_size = (1536, 1536), stride = 512)
                 pieces_list.append(piece)
         pieces_list = np.array(pieces_list).transpose(0,3,1,2)
         mini_patches.append(pieces_list)
-    return np.array(patches).transpose(0,3,1,2), np.array(intervals), mini_patches
+    return np.array(patches).transpose(0,3,1,2), np.array(intervals), np.array(mini_patches)
 
 
 def sliding_window(image, window_size = (384, 384), stride = 128):
@@ -554,6 +555,7 @@ def str2bool(v):
         return False
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
+
 
 if __name__ == '__main__':
     '''

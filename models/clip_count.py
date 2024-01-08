@@ -85,6 +85,7 @@ class CLIPCount(nn.Module):
         self.coop_width = coop_width if use_coop else 0
         self.img_encoder = CLIPViT(self.clip, self.clip_hidden_dim, use_vpt=self.use_vpt, vpt_width=self.vpt_width,vpt_depth = self.vpt_depth,unfreeze=unfreeze_vit)
         self.text_encoder = CLIPTextTransformer(self.clip, use_coop=self.use_coop, n_ctx = self.coop_width)
+        self.text_encoder_classfiy = CLIPTextTransformer(self.clip, use_coop=False)
 
         # --------------------------------------------------------------------------
         # Contrastive Learning related

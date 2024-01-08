@@ -32,7 +32,7 @@ class ContrastiveLoss(nn.Module):
         fused_text_embedding_map =  gt_text_embedding_map
         pos_mask = density_mask.squeeze_(-1) # (B, 14, 14, 1)
         
-        patch_embeddings = patch_embedding.reshape(-1, 14, 14, 512)
+        patch_embeddings = patch_embedding.reshape(-1, 14, 14, 512) # (B, 14, 14, 512)
         #batch cosine similarity, this function automatically normalizes the vectors
         sim_map = F.cosine_similarity(patch_embeddings, fused_text_embedding_map , dim=-1) # (B, 14, 14)
         # sim_global = F.cosine_similarity(img_embedding, fused_text_embedding_map , dim=-1) # (B, 1)

@@ -1,1 +1,3 @@
 python run.py --mode train --exp_name exp --batch_size 32 > train231207_15_13.log 2>&1; /usr/bin/shutdown
+
+python run_new.py --mode test --exp_name exp --batch_size 32 --dataset_type ShanghaiTech --ckpt epoch=209-val_mae=16.60.ckpt

@@ -8,6 +8,7 @@ import numpy as np
 from torchvision import transforms
 import scipy.ndimage as ndimage
 import torchvision.transforms as transforms
+import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 from PIL import Image
 import torch
@@ -18,6 +19,7 @@ import einops
 from scipy import io
 import glob as gb
 import cv2
+
 IM_NORM_MEAN = [0.485, 0.456, 0.406]
 IM_NORM_STD = [0.229, 0.224, 0.225]
 
@@ -76,6 +78,11 @@ class ShanghaiTech(Dataset):
             transforms.Resize(384), 
             transforms.ToTensor(),
         ])
+        # create an image conversion operation -lmj
+        self.preprocess_origin_img = transforms.Compose([
+            transforms.Resize(384*4),
+            transforms.ToTensor(),
+        ])
         self.preserve_the_original_image = preserve_the_original_image
         self.preserve_image_name = preserve_image_name
         self.preserve_all = preserve_all
@@ -100,10 +107,9 @@ class ShanghaiTech(Dataset):
             img = img.convert("RGB")
 
 
-        # create an image conversion operation -lmj
-        to_tensor = transforms.ToTensor()
+
         # Save the original scale image without compression（but we let the width bigger than height） -lmj
-        origin_img_tensor = to_tensor(img)
+        origin_img_tensor = self.preprocess_origin_img(img)
 
         img = self.preprocess(img)
         gt_cnt = self.gt_cnt[im_name]
@@ -119,13 +125,25 @@ class ShanghaiTech(Dataset):
                     gt_density[int(keypoint[0]), int(keypoint[1])] = 1.
                 else:
                     gt_density[int(keypoint[1]), int(keypoint[0])] = 1.
-            gt_density = ndimage.gaussian_filter(gt_density, sigma=(1, 1), order=0)
+            # gt_density = ndimage.gaussian_filter(gt_density, sigma=(1, 1), order=0)
             gt_density = torch.from_numpy(gt_density)
             gt_density = gt_density * 60
-            return img, gt_cnt, origin_img_tensor, gt_density, im_name
+            gt_density = gt_density[:, :img_height]
+            gt_density.unsqueeze_(0)
+            gt_density.unsqueeze_(0)
+            gt_density = F.interpolate(gt_density, size=(384, 384), mode='bilinear', align_corners=False)
+            gt_density.squeeze_(0)
+            gt_density.squeeze_(0)
+            gt_density = gt_density / 384 / 384 * img_height * img_height
+            # return img, gt_cnt, origin_img_tensor, gt_density, im_name, 'people'
+            return img[:, :, :384], gt_cnt, origin_img_tensor[:, :, :384 * 4], gt_density, im_name, 'people'
+            # return img[:,:,:384], gt_cnt, origin_img_tensor[:,:,:384*4], gt_density[:,:384], im_name, 'people'
         else:
             if self.preserve_the_original_image:
-                return img, gt_cnt, origin_img_tensor, im_name
+                if self.split == 'train':
+                    return img[:,:,:384], gt_cnt, origin_img_tensor[:,:,:384*4], im_name
+                else:
+                    return img, gt_cnt, origin_img_tensor, im_name
             elif self.preserve_image_name:
                 return img, gt_cnt, im_name
             else:
@@ -138,7 +156,7 @@ if __name__ == "__main__":
                            preserve_all=True)
     # dataset = ShanghaiTech(None, split="train", part="A")
     for i in range(len(dataset)):
-        img, cnt, origin_img_tensor, gt_density, im_name = dataset[i]
+        img, cnt, origin_img_tensor, gt_density, im_name, _ = dataset[i]
 
         gt_density = gt_density.detach().cpu().numpy()
         gt_density = einops.repeat(gt_density, 'h w -> c h w', c=3)

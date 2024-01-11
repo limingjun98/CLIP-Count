@@ -19,6 +19,7 @@ import einops
 from scipy import io
 import glob as gb
 import cv2
+import random
 
 IM_NORM_MEAN = [0.485, 0.456, 0.406]
 IM_NORM_STD = [0.229, 0.224, 0.225]
@@ -112,6 +113,10 @@ class ShanghaiTech(Dataset):
         origin_img_tensor = self.preprocess_origin_img(img)
 
         img = self.preprocess(img)
+        resized_width, resized_height = img.shape[-1], img.shape[-2]
+        max_translate_pixels = resized_width - resized_height
+        random_seed = random.random()
+        translate_pixels = int((max_translate_pixels + 1) * random_seed)
         gt_cnt = self.gt_cnt[im_name]
 
         if self.preserve_all:
@@ -141,7 +146,7 @@ class ShanghaiTech(Dataset):
         else:
             if self.preserve_the_original_image:
                 if self.split == 'train':
-                    return img[:,:,:384], gt_cnt, origin_img_tensor[:,:,:384*4], im_name
+                    return img[:,:,translate_pixels:384+translate_pixels], gt_cnt, origin_img_tensor[:,:,translate_pixels*4:(384+translate_pixels)*4], im_name
                 else:
                     return img, gt_cnt, origin_img_tensor, im_name
             elif self.preserve_image_name:

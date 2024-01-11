@@ -41,7 +41,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser('CLIP-Count', add_help=False)
     parser.add_argument("--mode",type = str, default = "train", choices = ["train", "test", "app"], help = "train or test or an interactive application")
     parser.add_argument("--exp_name",type = str, default = "exp", help = "experiment name")
-    parser.add_argument('--batch_size', default=32, type=int,
+    parser.add_argument('--batch_size', default=8, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
     parser.add_argument('--epochs', default=200, type=int)
     parser.add_argument('--accum_iter', default=1, type=int,
@@ -88,7 +88,7 @@ def get_args_parser():
     # Optimizer parameters
     parser.add_argument('--weight_decay', type=float, default=0.05,
                         help='weight decay (default: 0.05)')
-    parser.add_argument('--lr', type=float, default=1e-4, metavar='LR',
+    parser.add_argument('--lr', type=float, default=1e-6, metavar='LR',
                         help='learning rate (absolute lr)')
     parser.add_argument('--min_lr', type=float, default=0., metavar='LR',
                         help='lower lr bound for cyclic schedulers that hit 0')
@@ -165,8 +165,8 @@ class Model(LightningModule):
     def training_step(self, batch, batch_idx):
         if self.args.use_self_supervised:
             assert self.args.dataset_type == "ShanghaiTech", "should use ShanghaiTech when self-supervising"
-            image, gt_cnt, origin_img_tensor, im_name = batch
-            # image_crop = image[:,:,:,:384]
+            samples, gt_cnt, origin_img_tensor, im_name = batch
+            # image_crop = samples[:,:,:,:384]
             # gt_cnt = gt_cnt.item()
             prompt = ["people"] # [1]
             pseudo_list = []
@@ -189,7 +189,7 @@ class Model(LightningModule):
                     classify_prompt = ['heads', 'background', 'tree', 'leaves', 'sky', 'building']
                     classify_prompt = [f"a photo of {p}" for p in classify_prompt]
                     with torch.no_grad():
-                        text_token = clip.tokenize(classify_prompt).to(image.device)
+                        text_token = clip.tokenize(classify_prompt).to(samples.device)
                         text_embedding = self.model.text_encoder_classfiy(text_token).float()  # [6, 1, 512]
                     text_embedding.squeeze_(1)  # [6, 512]
                     text_embedding.unsqueeze_(0)  # [1, 6, 512]
@@ -230,7 +230,8 @@ class Model(LightningModule):
                 inference_tensor = torch.cat(inference_list, 0)
                 loss = self.loss(inference_tensor, pseudo_tensor) # [1]
             else:
-                loss = torch.randn(1)
+                loss = torch.randn(1).to(self.device)
+                loss.requires_grad_(True)
             # with torch.no_grad():
             #     output, extra_out = self.model(image_crop, prompt, return_extra=True, coop_require_grad=True)
 
@@ -245,11 +246,11 @@ class Model(LightningModule):
 
         # Compute loss function
         mask = np.random.binomial(n=1, p=0.8, size=[384,384])
-        masks = np.tile(mask,(output.shape[0],1))
-        masks = masks.reshape(output.shape[0], 384, 384)
+        masks = np.tile(mask,(samples.shape[0],1))
+        masks = masks.reshape(samples.shape[0], 384, 384)
         masks = torch.from_numpy(masks).to(self.device)
 
-        loss = (loss * masks / (384*384)).sum() / output.shape[0]
+        loss = (loss * masks / (384*384)).sum() / samples.shape[0]
         if not self.args.use_self_supervised and self.args.use_contrast and self.current_epoch <= self.args.contrast_pre_epoch:
             text_embedding = extra_out['text_embedding'] # [B,1, 512]
             if self.args.contrast_pos == "pre":
@@ -656,7 +657,7 @@ if __name__ == '__main__':
     trainer = Trainer(
         accelerator="gpu", 
         callbacks=[save_callback],
-        accumulate_grad_batches = args.accum_iter, 
+        accumulate_grad_batches = args.accum_iter,
         precision=16, 
         max_epochs=max_epochs,
         logger=logger,

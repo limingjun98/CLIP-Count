@@ -19,7 +19,7 @@ from models.contrastive_loss import ContrastiveLoss
 import torch
 import torch.nn.functional as F
 from typing import List, Dict, Any
-
+import clip
 
 import util.misc as misc
 from util.FSC147 import  FSC147
@@ -41,7 +41,7 @@ def get_args_parser():
     parser = argparse.ArgumentParser('CLIP-Count', add_help=False)
     parser.add_argument("--mode",type = str, default = "train", choices = ["train", "test", "app"], help = "train or test or an interactive application")
     parser.add_argument("--exp_name",type = str, default = "exp", help = "experiment name")
-    parser.add_argument('--batch_size', default=32, type=int,
+    parser.add_argument('--batch_size', default=8, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
     parser.add_argument('--epochs', default=200, type=int)
     parser.add_argument('--accum_iter', default=1, type=int,
@@ -76,9 +76,11 @@ def get_args_parser():
     parser.add_argument('--contrast_pre_epoch', default = 20, type = int, help = "how many epoch to use contrastive pretraining")
 
     # self supervise loss related -lmj
-    parser.add_argument('--use_self_supervised', default=False, type=misc.str2bool,
+    parser.add_argument('--test_method', default = 0, type = int,
+                        help="0 means normal, 1 means crop, 2 means crop and classify")
+    parser.add_argument('--use_self_supervised', default=True, type=misc.str2bool,
                         help = "whether to use self supervised")
-    parser.add_argument('--self_supervised_epoch', default = 0, type = int,
+    parser.add_argument('--self_supervised_epoch', default = 20, type = int,
                         help = "how many epoch to use self supervised loss finetuned")
     parser.add_argument('--resume_checkpoint', default=False, type=misc.str2bool,
                         help="whether to resume checkpoint.If resuming from mid-epoch checkpoint, training will start from the beginning of the next epoch")
@@ -86,7 +88,7 @@ def get_args_parser():
     # Optimizer parameters
     parser.add_argument('--weight_decay', type=float, default=0.05,
                         help='weight decay (default: 0.05)')
-    parser.add_argument('--lr', type=float, default=1e-4, metavar='LR',
+    parser.add_argument('--lr', type=float, default=1e-6, metavar='LR',
                         help='learning rate (absolute lr)')
     parser.add_argument('--min_lr', type=float, default=0., metavar='LR',
                         help='lower lr bound for cyclic schedulers that hit 0')
@@ -95,15 +97,17 @@ def get_args_parser():
     # Dataset parameters
     parser.add_argument('--data_path', default='./data/', type=str,
                         help='dataset path')
-    parser.add_argument('--dataset_type', default="FSC", type = str, choices=["FSC","CARPK", "COCO", "ShanghaiTech"])
+    parser.add_argument('--dataset_type', default="ShanghaiTech", type = str, choices=["FSC","CARPK", "COCO", "ShanghaiTech"])
 
     parser.add_argument('--output_dir', default='./out',
                         help='path where to save, empty for no saving')
     parser.add_argument('--seed', default=1, type=int)
 
 
-    parser.add_argument('--ckpt', default=None, type = str,
+    parser.add_argument('--ckpt', default='epoch=209-val_mae=16.60.ckpt', type = str,
                         help='path of resume from checkpoint')
+    # parser.add_argument('--ckpt', default=None, type=str,
+    #                     help='path of resume from checkpoint')
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--num_workers', default=0, type=int)
@@ -116,7 +120,7 @@ def get_args_parser():
     # log related
     parser.add_argument('--log_dir', default='./out',
                         help='path where to tensorboard log')
-    parser.add_argument('--log_test_img', default=False, type=bool, help="whehter to log overlaied density map when validation and testing.")
+    parser.add_argument('--log_test_img', default=True, type=bool, help="whehter to log overlaied density map when validation and testing.")
     parser.add_argument('--dont_log', action='store_true', help='do not log to tensorboard')
     parser.add_argument('--val_freq', default=1, type=int, help='check validation every val_freq epochs')
 
@@ -157,24 +161,103 @@ class Model(LightningModule):
         self.neg_prompt_embed = None
 
 
+
     def training_step(self, batch, batch_idx):
+        if self.args.use_self_supervised:
+            assert self.args.dataset_type == "ShanghaiTech", "should use ShanghaiTech when self-supervising"
+            samples, gt_cnt, origin_img_tensor, im_name = batch
+            # image_crop = samples[:,:,:,:384]
+            # gt_cnt = gt_cnt.item()
+            prompt = ["people"] # [1]
+            pseudo_list = []
+            inference_list = []
+            for h_ in range(origin_img_tensor.shape[0]): # batch_size(32) loop
+                slides, _, mini_patches = misc.sliding_window_origin_image(origin_img_tensor[h_:h_+1])
+                slides = torch.from_numpy(slides).float().to(self.device)  # [N, 3, 384, 384]/[N, 3, 1536, 1536]
+                prompt_big_img = np.repeat(prompt, slides.shape[0], axis=0)  # [N]
+                output_big_img = self.model(slides, prompt_big_img, coop_require_grad =  True)  # [N, 384, 384]
+                mini_patches = torch.from_numpy(mini_patches).float().to(self.device)
+                avg_pooling = torch.nn.AvgPool2d(2)
+                prompt_mini_patch = np.repeat(prompt, mini_patches.shape[1], axis=0) # [16]
+                pool_tensor_cat_list = []
+                bigimg_crop_pool_tensor_cat_list = []
+                for i in range(mini_patches.shape[0]):  # [N, 16, 3, 384, 384]
+                    with torch.no_grad():
+                        mini_patch_output, extra_out = self.model(mini_patches[i], prompt_mini_patch,
+                                                                  return_extra=True)  # [16, 384, 384]
+                    img_embedding = extra_out['x_cls']  # [16, 1, 512]
+                    classify_prompt = ['heads', 'background', 'tree', 'leaves', 'sky', 'building']
+                    classify_prompt = [f"a photo of {p}" for p in classify_prompt]
+                    with torch.no_grad():
+                        text_token = clip.tokenize(classify_prompt).to(samples.device)
+                        text_embedding = self.model.text_encoder_classfiy(text_token).float()  # [6, 1, 512]
+                    text_embedding.squeeze_(1)  # [6, 512]
+                    text_embedding.unsqueeze_(0)  # [1, 6, 512]
+                    sim_map = F.cosine_similarity(img_embedding, text_embedding, dim=-1)  # [16, 6]
+                    sim_map_max_index = sim_map.argmax(dim=1)  # [16]
 
-        samples, gt_density, boxes, m_flag, prompt_gt, prompt_add = batch
+                    pool_tensor_list = [] # [[1, 96, 96]]
+                    bigimg_crop_pool_tensor_list = [] # [[1, 96, 96]]
+                    for j in range(mini_patch_output.shape[0]): # 16 loop
+                        mini_patch_pool_tensor = mini_patch_output[j].detach().unsqueeze(0)
+                        mini_patch_pool_tensor = avg_pooling(mini_patch_pool_tensor) * 4
+                        mini_patch_pool_tensor = avg_pooling(mini_patch_pool_tensor) * 4
+                        mini_patch_pool_tensor.squeeze_(0)  # [96, 96]
+                        bigimg_crop_pool_tensor = output_big_img[i, (j // 4) * 96:(j // 4 + 1) * 96,
+                                                  (j % 4) * 96:(j % 4 + 1) * 96]
+                        bigimg_crop_pool_tensor_detach = bigimg_crop_pool_tensor.detach().clone()
+                        mini_patch_cnt = torch.sum(mini_patch_pool_tensor / SCALE_FACTOR).item()
+                        bigimg_crop_cnt = torch.sum(bigimg_crop_pool_tensor_detach / SCALE_FACTOR).item()
+                        # the classify result of the small pieces is the head
+                        if sim_map_max_index[j] == 0:
+                            if 2.5 < mini_patch_cnt / bigimg_crop_cnt < 10:
+                                pool_tensor = mini_patch_pool_tensor
+                                pool_tensor_list.append(pool_tensor.unsqueeze(0))
+                                bigimg_crop_pool_tensor_list.append(bigimg_crop_pool_tensor.unsqueeze(0))
+                        else:
+                            if 2.5 < mini_patch_cnt / bigimg_crop_cnt < 15 and bigimg_crop_cnt <= 3.5:
+                                pool_tensor = torch.zeros(96,96).to(self.device)
+                                pool_tensor_list.append(pool_tensor.unsqueeze(0))
+                                bigimg_crop_pool_tensor_list.append(bigimg_crop_pool_tensor.unsqueeze(0))
+                    if len(pool_tensor_list) == 0:
+                        continue
+                    pool_tensor_cat = torch.cat(pool_tensor_list, 0) # [S, 96, 96]
+                    bigimg_crop_pool_tensor_cat = torch.cat(bigimg_crop_pool_tensor_list, 0)  # [S, 96, 96]
+                    pool_tensor_cat_list.append(pool_tensor_cat)
+                    bigimg_crop_pool_tensor_cat_list.append(bigimg_crop_pool_tensor_cat)
+                if len(pool_tensor_cat_list) == 0:
+                    continue
+                pool_tensor_cat_cat = torch.cat(pool_tensor_cat_list, 0)
+                bigimg_crop_pool_tensor_cat_cat = torch.cat(bigimg_crop_pool_tensor_cat_list, 0)
+                pseudo_list.append(pool_tensor_cat_cat)
+                inference_list.append(bigimg_crop_pool_tensor_cat_cat)
+            if len(pseudo_list) != 0:
+                pseudo_tensor = torch.cat(pseudo_list, 0)
+                inference_tensor = torch.cat(inference_list, 0)
+                loss = self.loss(inference_tensor, pseudo_tensor) # [1]
+            else:
+                loss = torch.randn(1).to(self.device)
+                loss.requires_grad_(True)
+            # with torch.no_grad():
+            #     output, extra_out = self.model(image_crop, prompt, return_extra=True, coop_require_grad=True)
 
+        else:
+            samples, gt_density, boxes, m_flag, prompt_gt, prompt_add = batch
 
-        output, extra_out = self.model(samples, prompt_gt, return_extra=True, coop_require_grad =  True)
+            if not self.args.use_contrast:
+                prompt_gt = [f"a photo of {p}" for p in prompt_gt]
 
-        if not self.args.use_contrast:
-            prompt_gt = [f"a photo of {p}" for p in prompt_gt]
+            output, extra_out = self.model(samples, prompt_gt, return_extra=True, coop_require_grad =  True)
+            loss = self.loss(output, gt_density) # [1]
+
         # Compute loss function
         mask = np.random.binomial(n=1, p=0.8, size=[384,384])
-        masks = np.tile(mask,(output.shape[0],1))
-        masks = masks.reshape(output.shape[0], 384, 384)
+        masks = np.tile(mask,(samples.shape[0],1))
+        masks = masks.reshape(samples.shape[0], 384, 384)
         masks = torch.from_numpy(masks).to(self.device)
-        loss = self.loss(output, gt_density)
 
-        loss = (loss * masks / (384*384)).sum() / output.shape[0]
-        if self.args.use_contrast and self.current_epoch <= self.args.contrast_pre_epoch:
+        loss = (loss * masks / (384*384)).sum() / samples.shape[0]
+        if not self.args.use_self_supervised and self.args.use_contrast and self.current_epoch <= self.args.contrast_pre_epoch:
             text_embedding = extra_out['text_embedding'] # [B,1, 512]
             if self.args.contrast_pos == "pre":
                 patch_embedding = extra_out['patch_embedding_contrast'] # [B, 196, 512]
@@ -188,31 +271,38 @@ class Model(LightningModule):
 
         self.log('train_loss', loss)
 
+        if not self.args.use_self_supervised:
+            # Update information of MAE and RMSE
+            batch_mae = 0
 
-        # Update information of MAE and RMSE
-        batch_mae = 0
-
-        batch_rmse = 0
-        gt_sum = 0
-        for i in range(output.shape[0]):
-            pred_cnt = torch.sum(output[i]/SCALE_FACTOR).item()
-            gt_cnt = torch.sum(gt_density[i]/SCALE_FACTOR).item()
-            cnt_err = abs(pred_cnt - gt_cnt)
-            gt_sum += gt_cnt
-            batch_mae += cnt_err
-            batch_rmse += cnt_err ** 2
-        batch_mae /= output.shape[0]
-        batch_rmse /= output.shape[0]
-        batch_rmse = math.sqrt(batch_rmse)
-        # loss = loss / gt_sum
-        self.log('train_mae', batch_mae)
-        self.log('train_rmse', batch_rmse)
+            batch_rmse = 0
+            gt_sum = 0
+            for h_ in range(output.shape[0]):
+                pred_cnt = torch.sum(output[h_]/SCALE_FACTOR).item()
+                gt_cnt = torch.sum(gt_density[h_]/SCALE_FACTOR).item()
+                cnt_err = abs(pred_cnt - gt_cnt)
+                gt_sum += gt_cnt
+                batch_mae += cnt_err
+                batch_rmse += cnt_err ** 2
+            batch_mae /= output.shape[0]
+            batch_rmse /= output.shape[0]
+            batch_rmse = math.sqrt(batch_rmse)
+            # loss = loss / gt_sum
+            self.log('train_mae', batch_mae)
+            self.log('train_rmse', batch_rmse)
     
     
         return loss
     
     def validation_step(self, batch, batch_idx):
-        samples, gt_density, _, _, prompt, _ = batch
+        if self.args.use_self_supervised:
+            assert self.args.dataset_type == "ShanghaiTech", "should use ShanghaiTech when self-supervising"
+            image, _, origin_img_tensor, gt_density, im_name, prompt = batch
+            samples = image[:,:,:,:384]
+            gt_density = gt_density[:,:,:384]
+        else:
+            samples, gt_density, _, _, prompt, _ = batch
+
         if not self.args.use_contrast:
             prompt = [f"a photo of {p}" for p in prompt]
 
@@ -292,25 +382,110 @@ class Model(LightningModule):
             prompt = ["car" for _ in range(image.shape[0])]
             gt_density = torch.zeros(image.shape[0], image.shape[2], image.shape[3]) 
         elif self.args.dataset_type == "ShanghaiTech":
-            image, gt_cnt, im_name = batch
+            image, gt_cnt, origin_img_tensor, im_name = batch
             gt_cnt = gt_cnt.item()
-            prompt = ["people" for _ in range(image.shape[0])]
-            gt_density = torch.zeros(image.shape[0], image.shape[2], image.shape[3]) 
+            prompt = ["people" for _ in range(image.shape[0])] # [1]
+            gt_density = torch.zeros(image.shape[0], image.shape[2], image.shape[3])
 
 
         assert image.shape[0] == 1 , "only support inference one image at a time"
         raw_h, raw_w = image.shape[2:]
 
-        patches, _ = misc.sliding_window(image,stride=128)
-        #covert to batch
-        patches = torch.from_numpy(patches).float().to(self.device)
-        prompt = np.repeat(prompt, patches.shape[0], axis=0)
-        output = self.model(patches, prompt)
-        output.unsqueeze_(1)
-        output = misc.window_composite(output, stride=128)
-        output = output.squeeze(1)
-        #crop to original width
-        output = output[:, :, :raw_w]
+        if self.args.test_method == 2:
+            # composite mini-batch
+            # origin_img_tensor = origin_img_tensor.unsqueeze(0)
+            slides, _, mini_patches = misc.sliding_window_origin_image(origin_img_tensor)
+
+            slides = torch.from_numpy(slides).float().to(self.device)  # [N, 3, 384, 384]/[N, 3, 1536, 1536]
+            prompt_big_img = np.repeat(prompt, slides.shape[0], axis=0)  # [N]
+            output_big_img = self.model(slides, prompt_big_img) # [N, 384, 384]
+
+            mini_patches = torch.from_numpy(mini_patches).float().to(self.device)
+            avg_pooling = torch.nn.AvgPool2d(2)
+            output = []
+            prompt = np.repeat(prompt, mini_patches.shape[1], axis=0) # [16]
+            # n slice. n = mini_patches.shape[0]
+            for i in range(mini_patches.shape[0]):  # [N, 16, 3, 384, 384]
+                mini_patch_output, extra_out = self.model(mini_patches[i], prompt, return_extra = True)  # [16, 384, 384]
+                img_embedding = extra_out['x_cls']  # [16, 1, 512]
+                classify_prompt = ['heads','background','tree','leaves','sky','building']
+                classify_prompt = [f"a photo of {p}" for p in classify_prompt]
+                text_token = clip.tokenize(classify_prompt).to(image.device)
+                with torch.no_grad():
+                    text_embedding = self.model.text_encoder_classfiy(text_token).float() # [6, 1, 512]
+                text_embedding.squeeze_(1) # [6, 512]
+                # for index in range(4):
+                #     print(f'{index}: ',text_embedding[index].detach().equal(text_embedding[index+1].detach()))
+                text_embedding.unsqueeze_(0)  # [1, 6, 512]
+                # [16, 1, 512] and [1, 6, 512] => [16, 6]
+                sim_map = F.cosine_similarity(img_embedding, text_embedding, dim=-1)  # [16, 6]
+                sim_map_max_index = sim_map.argmax(dim=1) # [16]
+
+                pool_tensor_list = []
+                for j in range(mini_patch_output.shape[0]):
+                    # torch.sum(output[0] / SCALE_FACTOR).item()
+                    mini_patch_pool_tensor = mini_patch_output[j].detach().unsqueeze(0)
+                    mini_patch_pool_tensor = avg_pooling(mini_patch_pool_tensor) * 4
+                    mini_patch_pool_tensor = avg_pooling(mini_patch_pool_tensor) * 4
+                    mini_patch_pool_tensor.squeeze_(0)  # [96, 96]
+                    bigimg_crop_pool_tensor = output_big_img[i, (j // 4) * 96:(j // 4 + 1) * 96,
+                                          (j % 4) * 96:(j % 4 + 1) * 96].detach().clone()
+                    mini_patch_cnt = torch.sum(mini_patch_pool_tensor / SCALE_FACTOR).item()
+                    bigimg_crop_cnt = torch.sum(bigimg_crop_pool_tensor / SCALE_FACTOR).item()
+                    # the classify result of the small pieces is the head
+                    if sim_map_max_index[j] == 0 and 2.5 < mini_patch_cnt/bigimg_crop_cnt:
+                        pool_tensor = mini_patch_pool_tensor
+                    else:
+                        pool_tensor = bigimg_crop_pool_tensor
+                    pool_tensor_list.append(pool_tensor)
+                # concat all patches
+                results = []
+                for i_ in range(4):
+                    result = torch.cat(pool_tensor_list[i_*4:i_*4+4], 1)
+                    results.append(result)
+                results = torch.cat(results, 0) # [384, 384]
+                output.append(results.unsqueeze(0)) # [1, 384, 384]
+            # output = torch.Tensor(output)
+            output = torch.cat(output, 0) # [N, 384, 384]
+        elif self.args.test_method == 1:
+            # composite mini-batch
+            # origin_img_tensor = origin_img_tensor.unsqueeze(0)
+            slides, _, mini_patches = misc.sliding_window_origin_image(origin_img_tensor)
+            mini_patches = torch.from_numpy(mini_patches).float().to(self.device)
+            avg_pooling = torch.nn.AvgPool2d(2)
+            output = []
+            prompt = np.repeat(prompt, mini_patches.shape[1], axis=0)
+            # n slice. n = mini_patches.shape[0]
+            for i in range(mini_patches.shape[0]):  # [N, 16, 3, 384, 384]
+                mini_patch_output = self.model(mini_patches[i], prompt)  # [16, 384, 384]
+                pool_tensor_list = []
+                for j in range(mini_patch_output.shape[0]):
+                    pool_tensor = mini_patch_output[j].detach().unsqueeze(0)
+                    pool_tensor = avg_pooling(pool_tensor) * 4
+                    pool_tensor = avg_pooling(pool_tensor) * 4
+                    pool_tensor.squeeze_(0) # [96, 96]
+                    pool_tensor_list.append(pool_tensor)
+                results = []
+                for i_ in range(4):
+                    result = torch.cat(pool_tensor_list[i_*4:i_*4+4], 1)
+                    results.append(result)
+                results = torch.cat(results, 0) # [384, 384]
+                output.append(results.unsqueeze(0)) # [1, 384, 384]
+            # output = torch.Tensor(output)
+            output = torch.cat(output, 0) # [N, 384, 384]
+        elif self.args.test_method == 0:
+            patches, _ = misc.sliding_window(image, stride=128)
+            # covert to batch
+            patches = torch.from_numpy(patches).float().to(self.device) # [N, 3, 384, 384]
+            prompt = np.repeat(prompt, patches.shape[0], axis=0)
+            output = self.model(patches, prompt)
+
+        # Looks like adding a channel dimension
+        output.unsqueeze_(1) # [N, 1, 384, 384]
+        output = misc.window_composite(output, stride=128) # [1, 1, W+, 384]
+        output = output.squeeze(1) # [1, W+, 384]
+        # crop to original width
+        output = output[:, :, :raw_w] # [1, W, 384]
 
         # Update information of MAE and RMSE
         batch_mae = []
@@ -339,7 +514,9 @@ class Model(LightningModule):
 
 
         pred_density = einops.repeat(pred_density, 'h w -> c h w', c=3)
-        pred_density = pred_density / pred_density.max() #normalize
+        pred_density_max = pred_density.max()
+        tmp_sum = pred_density[0].sum()
+        # pred_density = pred_density / pred_density_max #normalize
         heatmap_pred = img_log 
         heatmap_pred = 0.33 * img_log + 0.67 * pred_density
         gt_density_log = einops.repeat(gt_density_log, 'h w -> c h w', c=3)
@@ -445,9 +622,14 @@ if __name__ == '__main__':
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     
+    if not args.use_self_supervised:
+        dataset_train = FSC147(split = "train")
+        all_classes_train = dataset_train.all_classes
+    else:
+        dataset_train = ShanghaiTech(None, split="train",
+                                                      part = "A", preserve_the_original_image=True)
+        all_classes_train = None
 
-    dataset_train = FSC147(split = "train")
-    all_classes_train = dataset_train.all_classes
     sampler_train = torch.utils.data.RandomSampler(dataset_train)
 
     train_dataloader = torch.utils.data.DataLoader(
@@ -458,7 +640,11 @@ if __name__ == '__main__':
         drop_last=False,
     )
     # the val set for training.
-    dataset_val = FSC147( split = "val")
+    if not args.use_self_supervised:
+        dataset_val = FSC147( split = "val")
+    else:
+        dataset_val = ShanghaiTech(None, split="test",
+                                                      part = "A", preserve_all=True)
     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
     val_dataloader =  torch.utils.data.DataLoader(
         dataset_val, sampler=sampler_val,
@@ -473,24 +659,26 @@ if __name__ == '__main__':
     save_callback = pl.callbacks.ModelCheckpoint(monitor='val_mae', save_top_k=4, mode='min',  filename='{epoch}-{val_mae:.2f}')
     model = Model(args,all_classes=all_classes_train)
     logger = pl.loggers.TensorBoardLogger("lightning_logs", name=args.exp_name)
+    max_epochs = args.self_supervised_epoch if args.use_self_supervised else args.epochs+args.contrast_pre_epoch
     trainer = Trainer(
         accelerator="gpu", 
         callbacks=[save_callback],
-        accumulate_grad_batches = args.accum_iter, 
+        accumulate_grad_batches = args.accum_iter,
         precision=16, 
-        max_epochs=args.epochs+args.contrast_pre_epoch+args.self_supervised_epoch,
+        max_epochs=max_epochs,
         logger=logger,
         check_val_every_n_epoch=args.val_freq,
     )
     if args.mode == "train":
         if args.ckpt is not None:
             model = Model.load_from_checkpoint(args.ckpt, strict=False)
+            model.overwrite_args(args)
         # model = Model.load_from_checkpoint('epoch=209-val_mae=16.60.ckpt', strict=False)
         # checkpoint = torch.load('epoch=209-val_mae=16.60.ckpt')
         # epp = checkpoint['epoch']
         if args.resume_checkpoint:
             # automatically restores model, epoch, step, LR schedulers, apex, etc...
-            trainer.fit(model, train_dataloader, val_dataloader, ckpt_path='last')
+            trainer.fit(model, train_dataloader, val_dataloader)
         else:
             trainer.fit(model, train_dataloader, val_dataloader)
     elif args.mode == "test":
@@ -505,7 +693,7 @@ if __name__ == '__main__':
             dataset_val = dataset_test = CARPK(None, split="test")
         elif args.dataset_type == "ShanghaiTech":
             dataset_val = dataset_test = ShanghaiTech(None, split="test",
-                                                      part = "B", preserve_image_name=True)
+                                                      part = "A", preserve_the_original_image=True)
 
 
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)

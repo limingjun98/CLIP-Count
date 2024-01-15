@@ -279,7 +279,8 @@ class Model(LightningModule):
                 inference_tensor = torch.cat(inference_list, 0)
                 loss = self.loss(inference_tensor, pseudo_tensor) # [1]
             else:
-                loss = torch.randn(1).to(self.device)
+                # loss = torch.randn(1).to(self.device)
+                loss = torch.tensor([0.]).to(self.device)
                 loss.requires_grad_(True)
             # with torch.no_grad():
             #     output, extra_out = self.model(image_crop, prompt, return_extra=True, coop_require_grad=True)

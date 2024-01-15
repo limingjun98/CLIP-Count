@@ -5,7 +5,7 @@
 # @Github    : https://github.com/songrise
 # @Description: script to train and test CLIP-Count
 #supress torchvision warnings
-# this version does not have teacher-student ema
+# try to add teacher-student EMA
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -167,9 +167,37 @@ class Model(LightningModule):
         self.shadow = {} # record teacher average weight parameter
         self.backup = {} # record student backup parameter
 
+    def register_params(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+
+    def update_params(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                assert name in self.shadow
+                new_average = (1.0 - self.args.teacher_decay) * param.data + self.args.teacher_decay * self.shadow[name]
+                self.shadow[name] = new_average.clone()
+
+    def apply_shadow_params(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                assert name in self.shadow
+                self.backup[name] = param.data
+                param.data = self.shadow[name]
+
+    def restore_params(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                assert name in self.backup
+                param.data = self.backup[name]
+        self.backup = {}
+
 
     def training_step(self, batch, batch_idx):
         if self.args.use_self_supervised:
+            if batch_idx>=1:
+                self.update_params()
             assert self.args.dataset_type == "ShanghaiTech", "should use ShanghaiTech when self-supervising"
             samples, gt_cnt, origin_img_tensor, im_name = batch
             # image_crop = samples[:,:,:,:384]
@@ -188,6 +216,9 @@ class Model(LightningModule):
                 pool_tensor_cat_list = []
                 bigimg_crop_pool_tensor_cat_list = []
                 for i in range(mini_patches.shape[0]):  # [N, 16, 3, 384, 384]
+
+                    self.apply_shadow_params()
+                    self.model.eval()
                     with torch.no_grad():
                         mini_patch_output, extra_out = self.model(mini_patches[i], prompt_mini_patch,
                                                                   return_extra=True)  # [16, 384, 384]
@@ -197,6 +228,9 @@ class Model(LightningModule):
                     with torch.no_grad():
                         text_token = clip.tokenize(classify_prompt).to(samples.device)
                         text_embedding = self.model.text_encoder_classfiy(text_token).float()  # [6, 1, 512]
+                    self.model.train()
+                    self.restore_params()
+
                     text_embedding.squeeze_(1)  # [6, 512]
                     text_embedding.unsqueeze_(0)  # [1, 6, 512]
                     sim_map = F.cosine_similarity(img_embedding, text_embedding, dim=-1)  # [16, 6]
@@ -225,7 +259,7 @@ class Model(LightningModule):
                             # if 2.5 < mini_patch_cnt / bigimg_crop_cnt < 15 and bigimg_crop_cnt <= 3.5:
                                 pool_tensor = torch.zeros(96,96).to(self.device)
                                 pool_tensor_list.append(pool_tensor.unsqueeze(0))
-                                bigimg_crop_pool_tensor_list.append(bigimg_crop_pool_tensor.unsqueeze(0) * self.args.consistency_factor)
+                                bigimg_crop_pool_tensor_list.append(bigimg_crop_pool_tensor.unsqueeze(0) * self.args.teacher_decay)
                     if len(pool_tensor_list) == 0:
                         continue
                     pool_tensor_cat = torch.cat(pool_tensor_list, 0) # [S, 96, 96]
@@ -682,6 +716,7 @@ if __name__ == '__main__':
         if args.ckpt is not None:
             model = Model.load_from_checkpoint(args.ckpt, strict=False)
             model.overwrite_args(args)
+        model.register_params()
         # model = Model.load_from_checkpoint('epoch=209-val_mae=16.60.ckpt', strict=False)
         # checkpoint = torch.load('epoch=209-val_mae=16.60.ckpt')
         # epp = checkpoint['epoch']

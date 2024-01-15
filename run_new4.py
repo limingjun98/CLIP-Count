@@ -88,7 +88,7 @@ def get_args_parser():
     # Optimizer parameters
     parser.add_argument('--weight_decay', type=float, default=0.05,
                         help='weight decay (default: 0.05)')
-    parser.add_argument('--lr', type=float, default=1e-7, metavar='LR',
+    parser.add_argument('--lr', type=float, default=1e-6, metavar='LR',
                         help='learning rate (absolute lr)')
     parser.add_argument('--min_lr', type=float, default=0., metavar='LR',
                         help='lower lr bound for cyclic schedulers that hit 0')
@@ -159,6 +159,7 @@ class Model(LightningModule):
         self.loss = F.mse_loss
         self.contrastive_loss = ContrastiveLoss(0.07,self.args.noise_text_ratio, self.args.normalize_contrast)
         self.neg_prompt_embed = None
+        self.consistency_factor = 2.
 
 
 
@@ -215,10 +216,11 @@ class Model(LightningModule):
                                 pool_tensor_list.append(pool_tensor.unsqueeze(0))
                                 bigimg_crop_pool_tensor_list.append(bigimg_crop_pool_tensor.unsqueeze(0))
                         else:
-                            if 2.5 < mini_patch_cnt / bigimg_crop_cnt < 15 and bigimg_crop_cnt <= 3.5:
+                            if 1 < mini_patch_cnt / bigimg_crop_cnt and bigimg_crop_cnt <= 8:
+                            # if 2.5 < mini_patch_cnt / bigimg_crop_cnt < 15 and bigimg_crop_cnt <= 3.5:
                                 pool_tensor = torch.zeros(96,96).to(self.device)
                                 pool_tensor_list.append(pool_tensor.unsqueeze(0))
-                                bigimg_crop_pool_tensor_list.append(bigimg_crop_pool_tensor.unsqueeze(0))
+                                bigimg_crop_pool_tensor_list.append(bigimg_crop_pool_tensor.unsqueeze(0) * self.consistency_factor)
                     if len(pool_tensor_list) == 0:
                         continue
                     pool_tensor_cat = torch.cat(pool_tensor_list, 0) # [S, 96, 96]

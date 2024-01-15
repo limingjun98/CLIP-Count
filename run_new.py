@@ -505,7 +505,7 @@ if __name__ == '__main__':
             dataset_val = dataset_test = CARPK(None, split="test")
         elif args.dataset_type == "ShanghaiTech":
             dataset_val = dataset_test = ShanghaiTech(None, split="test",
-                                                      part = "B", preserve_image_name=True)
+                                                      part = "A", preserve_image_name=True)
 
 
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)

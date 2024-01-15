@@ -160,6 +160,7 @@ class Model(LightningModule):
                         use_mixed_fim = self.args.use_mixed_fim,
                         unfreeze_vit = self.args.unfreeze_vit,
                         )
+        self.model.to('cuda')
         self.loss = F.mse_loss
         self.contrastive_loss = ContrastiveLoss(0.07,self.args.noise_text_ratio, self.args.normalize_contrast)
         self.neg_prompt_embed = None
@@ -171,6 +172,7 @@ class Model(LightningModule):
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 self.shadow[name] = param.data.clone()
+                pass
 
     def update_params(self):
         for name, param in self.model.named_parameters():
@@ -196,8 +198,7 @@ class Model(LightningModule):
 
     def training_step(self, batch, batch_idx):
         if self.args.use_self_supervised:
-            if batch_idx>=1:
-                self.update_params()
+            self.update_params()
             assert self.args.dataset_type == "ShanghaiTech", "should use ShanghaiTech when self-supervising"
             samples, gt_cnt, origin_img_tensor, im_name = batch
             # image_crop = samples[:,:,:,:384]
@@ -215,10 +216,11 @@ class Model(LightningModule):
                 prompt_mini_patch = np.repeat(prompt, mini_patches.shape[1], axis=0) # [16]
                 pool_tensor_cat_list = []
                 bigimg_crop_pool_tensor_cat_list = []
-                for i in range(mini_patches.shape[0]):  # [N, 16, 3, 384, 384]
 
-                    self.apply_shadow_params()
-                    self.model.eval()
+                self.apply_shadow_params()
+                self.model.eval()
+
+                for i in range(mini_patches.shape[0]):  # [N, 16, 3, 384, 384]
                     with torch.no_grad():
                         mini_patch_output, extra_out = self.model(mini_patches[i], prompt_mini_patch,
                                                                   return_extra=True)  # [16, 384, 384]
@@ -228,14 +230,10 @@ class Model(LightningModule):
                     with torch.no_grad():
                         text_token = clip.tokenize(classify_prompt).to(samples.device)
                         text_embedding = self.model.text_encoder_classfiy(text_token).float()  # [6, 1, 512]
-                    self.model.train()
-                    self.restore_params()
-
                     text_embedding.squeeze_(1)  # [6, 512]
                     text_embedding.unsqueeze_(0)  # [1, 6, 512]
                     sim_map = F.cosine_similarity(img_embedding, text_embedding, dim=-1)  # [16, 6]
                     sim_map_max_index = sim_map.argmax(dim=1)  # [16]
-
                     pool_tensor_list = [] # [[1, 96, 96]]
                     bigimg_crop_pool_tensor_list = [] # [[1, 96, 96]]
                     for j in range(mini_patch_output.shape[0]): # 16 loop
@@ -266,6 +264,10 @@ class Model(LightningModule):
                     bigimg_crop_pool_tensor_cat = torch.cat(bigimg_crop_pool_tensor_list, 0)  # [S, 96, 96]
                     pool_tensor_cat_list.append(pool_tensor_cat)
                     bigimg_crop_pool_tensor_cat_list.append(bigimg_crop_pool_tensor_cat)
+
+                self.model.train()
+                self.restore_params()
+
                 if len(pool_tensor_cat_list) == 0:
                     continue
                 pool_tensor_cat_cat = torch.cat(pool_tensor_cat_list, 0)

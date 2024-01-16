@@ -81,6 +81,8 @@ def get_args_parser():
                         help="whether to use ema")
     parser.add_argument('--test_method', default = 0, type = int,
                         help="0 means normal, 1 means crop, 2 means crop and classify")
+    parser.add_argument('--patch_max_cnt', default=100, type=int,
+                        help="the max_count of those mini_patch which will be used for self supervised")
     parser.add_argument('--use_self_supervised', default=True, type=misc.str2bool,
                         help = "whether to use self supervised")
     parser.add_argument('--self_supervised_epoch', default = 20, type = int,
@@ -251,7 +253,7 @@ class Model(LightningModule):
                         bigimg_crop_cnt = torch.sum(bigimg_crop_pool_tensor_detach / SCALE_FACTOR).item()
                         # the classify result of the small pieces is the head
                         if sim_map_max_index[j] == 0:
-                            if 2.5 < mini_patch_cnt / bigimg_crop_cnt < 10:
+                            if 1 < mini_patch_cnt / bigimg_crop_cnt < 7 and self.args.patch_max_cnt <= 160:
                                 pool_tensor = mini_patch_pool_tensor
                                 pool_tensor_list.append(pool_tensor.unsqueeze(0))
                                 bigimg_crop_pool_tensor_list.append(bigimg_crop_pool_tensor.unsqueeze(0))

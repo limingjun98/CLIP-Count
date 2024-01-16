@@ -253,7 +253,8 @@ class Model(LightningModule):
                         bigimg_crop_cnt = torch.sum(bigimg_crop_pool_tensor_detach / SCALE_FACTOR).item()
                         # the classify result of the small pieces is the head
                         if sim_map_max_index[j] == 0:
-                            if 1 < mini_patch_cnt / bigimg_crop_cnt < 7 and self.args.patch_max_cnt <= 160:
+                            # if 1 < mini_patch_cnt / bigimg_crop_cnt < 7 and self.args.patch_max_cnt <= 160:
+                            if mini_patch_cnt / bigimg_crop_cnt < 7 and self.args.patch_max_cnt <= 160:
                                 pool_tensor = mini_patch_pool_tensor
                                 pool_tensor_list.append(pool_tensor.unsqueeze(0))
                                 bigimg_crop_pool_tensor_list.append(bigimg_crop_pool_tensor.unsqueeze(0))

@@ -5,7 +5,7 @@
 # @Github    : https://github.com/songrise
 # @Description: script to train and test CLIP-Count
 #supress torchvision warnings
-# try to add teacher-student EMA
+# add self-adapted factor
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -77,8 +77,12 @@ def get_args_parser():
     parser.add_argument('--contrast_pre_epoch', default = 20, type = int, help = "how many epoch to use contrastive pretraining")
 
     # self supervise loss related -lmj
+    parser.add_argument('--use_ema', default=True, type=misc.str2bool,
+                        help="whether to use ema")
     parser.add_argument('--test_method', default = 0, type = int,
                         help="0 means normal, 1 means crop, 2 means crop and classify")
+    parser.add_argument('--patch_max_cnt', default=100, type=int,
+                        help="the max_count of those mini_patch which will be used for self supervised")
     parser.add_argument('--use_self_supervised', default=True, type=misc.str2bool,
                         help = "whether to use self supervised")
     parser.add_argument('--self_supervised_epoch', default = 20, type = int,
@@ -162,6 +166,13 @@ class Model(LightningModule):
                         )
         self.model.to('cuda')
         self.loss = F.mse_loss
+        self.best_mae = 1000.
+        self.best_rmse = 1000.
+        self.last_mae = 1000.
+        self.last_rmse = 1000.
+        self.larger_factor = 1.
+        self.smaller_factor = 1.
+        self.accumulate_increase = 0
         self.contrastive_loss = ContrastiveLoss(0.07,self.args.noise_text_ratio, self.args.normalize_contrast)
         self.neg_prompt_embed = None
         # self.consistency_factor = 2.
@@ -198,7 +209,8 @@ class Model(LightningModule):
 
     def training_step(self, batch, batch_idx):
         if self.args.use_self_supervised:
-            self.update_params()
+            if self.args.use_ema:
+                self.update_params()
             assert self.args.dataset_type == "ShanghaiTech", "should use ShanghaiTech when self-supervising"
             samples, gt_cnt, origin_img_tensor, im_name = batch
             # image_crop = samples[:,:,:,:384]
@@ -248,16 +260,21 @@ class Model(LightningModule):
                         bigimg_crop_cnt = torch.sum(bigimg_crop_pool_tensor_detach / SCALE_FACTOR).item()
                         # the classify result of the small pieces is the head
                         if sim_map_max_index[j] == 0:
-                            if 2.5 < mini_patch_cnt / bigimg_crop_cnt < 10:
+                            larger_rate = 2. * self.larger_factor / (self.larger_factor + self.smaller_factor)
+                            # if 1 < mini_patch_cnt / bigimg_crop_cnt < 7 and self.args.patch_max_cnt <= 160:
+                            if 2 < mini_patch_cnt / bigimg_crop_cnt < 7 and mini_patch_cnt <= self.args.patch_max_cnt:
                                 pool_tensor = mini_patch_pool_tensor
-                                pool_tensor_list.append(pool_tensor.unsqueeze(0))
-                                bigimg_crop_pool_tensor_list.append(bigimg_crop_pool_tensor.unsqueeze(0))
+                                pool_tensor_list.append(pool_tensor.unsqueeze(0) * larger_rate)
+                                bigimg_crop_pool_tensor_list.append(bigimg_crop_pool_tensor.unsqueeze(0) * larger_rate)
                         else:
-                            if 1 < mini_patch_cnt / bigimg_crop_cnt and bigimg_crop_cnt <= 8:
+                            smaller_rate = 2. * self.smaller_factor / (self.larger_factor + self.smaller_factor)
+                            pool_tensor = torch.zeros(96, 96).to(self.device)
+                            pool_tensor_list.append(pool_tensor.unsqueeze(0) * smaller_rate)
+                            if 1 < mini_patch_cnt / bigimg_crop_cnt and bigimg_crop_cnt <= 10:
                             # if 2.5 < mini_patch_cnt / bigimg_crop_cnt < 15 and bigimg_crop_cnt <= 3.5:
-                                pool_tensor = torch.zeros(96,96).to(self.device)
-                                pool_tensor_list.append(pool_tensor.unsqueeze(0))
-                                bigimg_crop_pool_tensor_list.append(bigimg_crop_pool_tensor.unsqueeze(0) * self.args.consistency_factor)
+                                bigimg_crop_pool_tensor_list.append(bigimg_crop_pool_tensor.unsqueeze(0) * self.args.consistency_factor * smaller_rate)
+                            else:
+                                bigimg_crop_pool_tensor_list.append(bigimg_crop_pool_tensor.unsqueeze(0) * smaller_rate)
                     if len(pool_tensor_list) == 0:
                         continue
                     pool_tensor_cat = torch.cat(pool_tensor_list, 0) # [S, 96, 96]
@@ -278,6 +295,7 @@ class Model(LightningModule):
                 pseudo_tensor = torch.cat(pseudo_list, 0)
                 inference_tensor = torch.cat(inference_list, 0)
                 loss = self.loss(inference_tensor, pseudo_tensor) # [1]
+                loss = loss * pseudo_tensor.shape[0] / (4 * 4 * origin_img_tensor.shape[0]) # normalization
             else:
                 # loss = torch.randn(1).to(self.device)
                 loss = torch.tensor([0.]).to(self.device)
@@ -354,6 +372,7 @@ class Model(LightningModule):
 
         
         # Update information of MAE and RMSE
+        cnt_err_with_sign_list = []
         batch_mae = []
         batch_rmse = []
         pred_cnts = []
@@ -361,7 +380,9 @@ class Model(LightningModule):
         for i in range(output.shape[0]):
             pred_cnt = torch.sum(output[i]/SCALE_FACTOR).item() # SCALE_FACTOR is the scaling factor as CounTR uses
             gt_cnt = torch.sum(gt_density[i]/SCALE_FACTOR).item()
-            cnt_err = abs(pred_cnt - gt_cnt)
+            cnt_err_with_sign = pred_cnt - gt_cnt
+            cnt_err = abs(cnt_err_with_sign)
+            cnt_err_with_sign_list.append(cnt_err_with_sign)
             batch_mae.append(cnt_err)
             batch_rmse.append(cnt_err ** 2)
             pred_cnts.append(pred_cnt)
@@ -384,19 +405,40 @@ class Model(LightningModule):
         gt_density_log = einops.repeat(gt_density_log, 'h w -> c h w', c=3)
         heatmap_gt = 0.33 * img_log + 0.67 * gt_density_log
 
-        return {"mae": batch_mae, "rmse": batch_rmse, "img": img_log, "pred": pred_log_rgb, "gt": gt_log_rgb, "heatmap_pred": heatmap_pred, "heatmap_gt": heatmap_gt, "prompt": prompt[0], "pred_cnts": pred_cnts, "gt_cnts": gt_cnts}
-    
+        return {"mae": batch_mae, "rmse": batch_rmse, "cnt_err_with_sign_list": cnt_err_with_sign_list , "img": img_log, "pred": pred_log_rgb, "gt": gt_log_rgb, "heatmap_pred": heatmap_pred, "heatmap_gt": heatmap_gt, "prompt": prompt[0], "pred_cnts": pred_cnts, "gt_cnts": gt_cnts}
+
     def validation_epoch_end(self, outputs):
+        all_cnt_err_with_sign = []
         all_mae = []
         all_rmse = []
 
         for output in outputs:
+            all_cnt_err_with_sign += output["cnt_err_with_sign_list"]
             all_mae += output["mae"]
             all_rmse += output["rmse"]
         val_mae = np.mean(all_mae)
         val_rmse = np.sqrt(np.mean(all_rmse))
         self.log('val_mae', val_mae)
         self.log('val_rmse', val_rmse)
+
+
+        pos_cnt_err_with_sign = [item for item in all_cnt_err_with_sign if item > 0]
+        if val_mae >= self.last_mae and val_rmse >= self.last_rmse:
+            self.accumulate_increase += 1
+        else:
+            self.accumulate_increase = 0
+        if self.accumulate_increase > 5 and abs(val_rmse-self.best_rmse)/self.best_rmse >= 0.05 and abs(val_mae-self.best_mae)/self.best_mae >= 0.05:
+            if len(pos_cnt_err_with_sign) / len(all_cnt_err_with_sign) > 0.5:
+                self.smaller_factor += 1
+            else:
+                self.larger_factor += 1
+        if val_mae < self.best_mae:
+            self.best_mae = val_mae
+        if val_rmse < self.best_rmse:
+            self.best_rmse = val_rmse
+        self.last_mae = val_mae
+        self.last_rmse = val_rmse
+
 
         # log the image
         idx = random.randint(0, len(outputs)-1)
@@ -610,7 +652,7 @@ class Model(LightningModule):
                 img.save(log_dir + name)
 
         return {"mae": batch_mae, "rmse": batch_rmse, "img": img_log, "pred": pred_log_rgb, "gt": gt_log_rgb, "heatmap_pred": heatmap_pred, "heatmap_gt": heatmap_gt, "prompt": prompt[0], "pred_cnts": pred_cnts, "gt_cnts": gt_cnts}
-    
+
     def test_epoch_end(self, outputs):
         all_mae = []
         all_rmse = []

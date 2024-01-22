@@ -263,7 +263,7 @@ class Model(LightningModule):
                             pool_tensor_list.append(pool_tensor.unsqueeze(0))
                             if 1 < mini_patch_cnt / bigimg_crop_cnt and bigimg_crop_cnt <= 10:
                             # if 2.5 < mini_patch_cnt / bigimg_crop_cnt < 15 and bigimg_crop_cnt <= 3.5:
-                                bigimg_crop_pool_tensor_list.append(bigimg_crop_pool_tensor.unsqueeze(0) * self.args.teacher_decay)
+                                bigimg_crop_pool_tensor_list.append(bigimg_crop_pool_tensor.unsqueeze(0) * self.args.consistency_factor)
                             else:
                                 bigimg_crop_pool_tensor_list.append(bigimg_crop_pool_tensor.unsqueeze(0))
                     if len(pool_tensor_list) == 0:

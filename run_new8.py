@@ -172,8 +172,8 @@ class Model(LightningModule):
         self.best_rmse = 1000.
         self.last_mae = 1000.
         self.last_rmse = 1000.
-        self.larger_factor = 1.
-        self.smaller_factor = 1.
+        self.larger_factor = 2.
+        self.smaller_factor = 2.
         self.last_cnt = 1000.
         self.accumulate_increase = 0
         self.contrastive_loss = ContrastiveLoss(0.07,self.args.noise_text_ratio, self.args.normalize_contrast)

@@ -254,7 +254,7 @@ class Model(LightningModule):
                         # the classify result of the small pieces is the head
                         if sim_map_max_index[j] == 0:
                             # if 1 < mini_patch_cnt / bigimg_crop_cnt < 7 and self.args.patch_max_cnt <= 160:
-                            if mini_patch_cnt / bigimg_crop_cnt < 7 and mini_patch_cnt <= self.args.patch_max_cnt:
+                            if 2 < mini_patch_cnt / bigimg_crop_cnt < 7 and mini_patch_cnt <= self.args.patch_max_cnt:
                                 pool_tensor = mini_patch_pool_tensor
                                 pool_tensor_list.append(pool_tensor.unsqueeze(0))
                                 bigimg_crop_pool_tensor_list.append(bigimg_crop_pool_tensor.unsqueeze(0))
@@ -286,6 +286,7 @@ class Model(LightningModule):
                 pseudo_tensor = torch.cat(pseudo_list, 0)
                 inference_tensor = torch.cat(inference_list, 0)
                 loss = self.loss(inference_tensor, pseudo_tensor) # [1]
+                loss = loss * pseudo_tensor.shape[0] / (4 * 4 * origin_img_tensor.shape[0]) # normalization
             else:
                 # loss = torch.randn(1).to(self.device)
                 loss = torch.tensor([0.]).to(self.device)
@@ -647,7 +648,7 @@ class Model(LightningModule):
             weight_decay=self.args.weight_decay,
         )
 
-        schedular = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.33)
+        schedular = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.33)
         return {"optimizer": optimizer, "lr_scheduler": schedular, "monitor": "val_mae"}
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:

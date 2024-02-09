@@ -81,55 +81,48 @@ class ContrastiveLossBoost(nn.Module):
         gt_t = gt_t.reshape(gt_t.shape[0], -1)  # [B, 196]
         digital_text_emb_list = []
         digital_text_list = []
-        digital_text_dict = {}
         for i in range(gt_t.shape[0]):
             for j in range(gt_t.shape[1]):
-                text = str(int(round(gt_t[i,j].item())))
-                if text in digital_text_dict:
-                    text_embedding = digital_text_dict[text]
-                else:
-                    text_token = clip.tokenize(text).cuda()
-                    text_embedding = self.text_encoder(text_token).float()
-                    digital_text_dict[text] = text_embedding
+                text = str(round(gt_t[i,j].item()))
+                digital_text_list.append(text)
                 # text_token = clip.tokenize(text).cuda()
                 # text_embedding = self.text_encoder(text_token).float()
-                digital_text_emb_list.append(text_embedding)
-        # text_token = clip.tokenize(digital_text_list).cuda()
+                # digital_text_emb_list.append(text_embedding)
+        text_token = clip.tokenize(digital_text_list).cuda()
         # for i in range(gt_t.shape[1]):
         #     text_embedding = self.text_encoder(text_token[i*196:(i+1)*196, :]).float()
         #     digital_text_list.append(text_embedding)
 
-        # text_embedding = self.text_encoder(text_token[:100,:])
-        digital_text_emb_map = torch.cat(digital_text_emb_list, dim=0)
-        digital_text_emb_map = digital_text_emb_map.reshape(-1, 196, 512)  # (B, 196, 512)
-        # my_sum2 = torch.sum(gt_t)
+
+        text_embedding = self.text_encoder(text_token[:100,:])
+        # digital_text_emb = torch.stack(digital_text_emb_list, dim=0)
+        my_sum2 = torch.sum(gt_t)
         density_mask = F.max_pool2d(gt_density, kernel_size=16, stride=16, padding=0)  # same as ViT conv1
         density_mask = density_mask > 0.
         density_mask = density_mask.permute(0, 2, 3, 1)  # (B, 14, 14, 1)
 
-        # gt_text_embedding_map = gt_text_embedding_map.unsqueeze(1).expand(-1, 14, 14, -1)
+        gt_text_embedding_map = gt_text_embedding_map.unsqueeze(1).expand(-1, 14, 14, -1)
 
         # [B, 14, 14, 512], contains both gt and noise text embedding
-        # fused_text_embedding_map = gt_text_embedding_map
-        # pos_mask = density_mask.squeeze_(-1)  # (B, 14, 14)
-        #
-        # patch_embeddings = patch_embedding.reshape(-1, 14, 14, 512)  # (B, 14, 14, 512)
+        fused_text_embedding_map = gt_text_embedding_map
+        pos_mask = density_mask.squeeze_(-1)  # (B, 14, 14)
 
-        # digital_text_embedding_map = fused_text_embedding_map.reshape(-1, 196, 512)  # (B, 196, 512)
+        patch_embeddings = patch_embedding.reshape(-1, 14, 14, 512)  # (B, 14, 14, 512)
+
+        digital_text_embedding_map = fused_text_embedding_map.reshape(-1, 196, 512)  # (B, 196, 512)
         patch_emb = patch_embedding.unsqueeze(2) # (B, 196, 1, 512)
-        digital_text_embed = digital_text_emb_map.unsqueeze(1)  # (B, 1, 196, 512)
-        img_text_similarity = F.cosine_similarity(patch_emb, digital_text_embed, dim=-1)  # (B, 196, 196) （B, N, C）
-        img_text_similarity = img_text_similarity.permute(0, 2, 1)  # (B, C, N)
+        digital_text_embed = digital_text_embedding_map.unsqueeze(1)  # (B, 1, 196, 512)
+        res = F.cosine_similarity(patch_emb, digital_text_embed, dim=-1)  # (B, 196, 196) （B, N, C）
+        res = res.permute(0, 2, 1)  # (B, C, N)
         gt_tensor = torch.arange(196).cuda()
-        gt_tensor = gt_tensor.expand(img_text_similarity.shape[0], -1)
-        # res2 = res / self.temperature
-        the_loss1 = self.criterion_loss_fn(img_text_similarity / self.temperature, gt_tensor) * 0.5
-        the_loss2 = self.criterion_loss_fn(img_text_similarity.permute(0, 2, 1) / self.temperature, gt_tensor) * 0.5
-        # the_loss2 = self.criterion_loss_fn(res2, gt_tensor)
-        # out1 = F.softmax(res, dim=-1)
-        # out2 = F.softmax(res2, dim=-1)
-        # cc = 1
-        # img_normlen = patch_embeddings.norm(dim=-1, keepdim=True)
+        gt_tensor = gt_tensor.expand(res.shape[0], -1)
+        res2 = res / self.temperature
+        the_loss = self.criterion_loss_fn(res, gt_tensor)
+        the_loss2 = self.criterion_loss_fn(res2, gt_tensor)
+        pass
+        out1 = F.softmax(res, dim=-1)
+        out2 = F.softmax(res2, dim=-1)
+        img_normlen = patch_embeddings.norm(dim=-1, keepdim=True)
         # text_normlen = fused_text_embedding_map.norm(dim=-1, keepdim=True)
 
         '''
@@ -151,4 +144,3 @@ class ContrastiveLossBoost(nn.Module):
         return loss.mean()
         '''
 
-        return the_loss1 + the_loss2

@@ -158,7 +158,7 @@ class Model(LightningModule):
 
         # if not self.args.use_self_supervised:
         #     self.args.self_supervised_epoch = 0
-        self.args.self_supervised_epoch = 0
+        # self.args.self_supervised_epoch = 0
 
     def training_step(self, batch, batch_idx):
 

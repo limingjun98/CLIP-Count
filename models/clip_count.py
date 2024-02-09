@@ -186,15 +186,25 @@ class CLIPCount(nn.Module):
 
         return pred_density, extra_out
 
-    def forward(self, imgs, text, return_extra:bool = False, coop_require_grad:bool = False):
-
-        text_token = clip.tokenize(text).to(imgs.device)
+    def forward(self, imgs, text, return_extra:bool = False, coop_require_grad:bool = False, use_digital_prompt:bool = False):
+        if not use_digital_prompt:
+            text_token = clip.tokenize(text).to(imgs.device)  # [B, 77]
+        else:
+            digial_text = []
+            for i, item in enumerate(text):
+                tmp_list = [str(j*16)+' '+item for j in range(16)]
+                digial_text = digial_text + tmp_list
+                # digial_text.append(tmp_list)
+            text_token = clip.tokenize(digial_text).to(imgs.device)
 
         if coop_require_grad:
             text_embedding = self.text_encoder(text_token).float()
         else:
             with torch.no_grad():
-                text_embedding = self.text_encoder(text_token).float()
+                text_embedding = self.text_encoder(text_token).float()  # [B, 1, 512]
+
+        if use_digital_prompt:
+            text_embedding = text_embedding.reshape(len(text), -1, 512)
 
         cls_token, img_feat_patches = self.forward_visual_encoder(imgs, text_embedding)
         pred_density, extra_out = self.forward_decoder(img_feat_patches, text_embedding, cls_token)  # [N, 384, 384]

@@ -107,8 +107,8 @@ class CrossAttention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, x, y):
-        B, Nx, C = x.shape
-        Ny = y.shape[1]
+        B, Nx, C = x.shape  # [B, 196, 512]
+        Ny = y.shape[1]  # [B, Ny, 512], Ny = 1 when not use_digital_contrast
         # BNxC -> BNxH(C/H) -> BHNx(C/H)
         q = self.wq(x).reshape(B, Nx, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
         # BNyC -> BNyH(C/H) -> BHNy(C/H)

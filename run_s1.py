@@ -166,7 +166,7 @@ class Model(LightningModule):
 
         samples, gt_density, boxes, m_flag, prompt_gt, prompt_add = batch
 
-        if self.args.use_digital_contrast:
+        if self.args.use_digital_contrast and self.current_epoch >= self.args.contrast_pre_epoch + self.args.digital_contrast_pre_epoch:
             use_digital_prompt = True
         else:
             use_digital_prompt = False

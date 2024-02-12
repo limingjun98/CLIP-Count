@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.models_crossvit import CrossAttentionBlock, ConvCrossAttentionBlock
+from models.models_crossvit import CrossAttentionBlock, ConvCrossAttentionBlock, Img2ImgCrossAttentionBlock
 
 from util.pos_embed import get_2d_sincos_pos_embed, positional_encoding_1d
 import clip
@@ -26,7 +26,8 @@ class CLIPCount(nn.Module):
                  backbone:str="b16",
                  use_fim:bool = True, 
                  use_mixed_fim:bool=False, 
-                 unfreeze_vit:bool=False):
+                 unfreeze_vit:bool=False,
+                 use_img2img_cross:bool=False):
         """
         The CLIP-Count model   
         Param:
@@ -44,7 +45,7 @@ class CLIPCount(nn.Module):
             unfreeze_vit: whether to fintune all clip vit parameters.
         """
         super().__init__()
-
+        self.use_img2img_cross = use_img2img_cross
         # --------------------------------------------------------------------------
         # MAE encoder specifics
         if backbone == "b16":
@@ -119,14 +120,17 @@ class CLIPCount(nn.Module):
             self.fim_blocks = nn.ModuleList([
                 CrossAttentionBlock(self.clip_out_dim, fim_num_heads, mlp_ratio, qkv_bias=True, qk_scale=None, norm_layer=norm_layer, drop=0.1, drop_path=0.1)
                 for _ in range(fim_depth)])
-
+        # self.img2img_cross_blocks = nn.ModuleList([
+        #     Img2ImgCrossAttentionBlock(self.clip_out_dim, fim_num_heads, mlp_ratio, qkv_bias=True, qk_scale=None,
+        #                         norm_layer=norm_layer, drop=0.1, drop_path=0.1)
+        #     for _ in range(4)])
 
         self.decoder_norm = norm_layer(self.clip_out_dim)
 
 
         # --------------------------------------------------------------------------
         # CNN-based density decoder
-        self.density_decoder = DensityDecoder(self.clip_out_dim, 384, use_hiearachy = use_mixed_fim)
+        self.density_decoder = DensityDecoder(self.clip_out_dim, 384, use_hiearachy = use_mixed_fim, fim_num_heads=fim_num_heads, mlp_ratio=mlp_ratio, norm_layer=norm_layer)
         # --------------------------------------------------------------------------
     
 
@@ -140,6 +144,34 @@ class CLIPCount(nn.Module):
         _, cls_token, x = self.img_encoder(x, text_embedding)
         return cls_token, x
 
+    def forward_img2img_decoder(self, img_feat_patches, text_embedding, cls_token):
+        assert self.use_mixed_fim, "only support use_mixed_fim"
+
+        extra_out = {}
+        x_cls = cls_token
+        extra_out['x_cls'] = x_cls
+        extra_out['text_embedding'] = text_embedding
+        patch_feat = img_feat_patches
+        patch_embedding = self.patch_feat_proj(patch_feat)
+        extra_out['patch_embedding'] = patch_embedding[:,1:,:]
+        patch_embedding_contrast = self.patch_feat_proj_contrast(patch_feat)
+        extra_out['patch_embedding_contrast'] = patch_embedding_contrast[:,1:,:]
+
+        x = patch_embedding[:,1:,:] + self.patch_emb_pos_embed  # [B, 196, 512]
+        x = torch.cat([patch_embedding[:,0:1,:], x], dim=1)
+        y_ = text_embedding
+
+        # apply Transformer blocks (cross-attention)
+        xs = []
+        for blk in self.fim_blocks:
+            x = blk(x, y_, with_cls_token = True)
+            xs.append(x)
+        x = self.decoder_norm(x)
+        x = self.seq_2_2d(x[:,1:,:])
+        extra_out['pixel_text_matching_map'] = x
+        pred_density = self.density_decoder.forward_hierarchical_img2img(xs)
+        return pred_density, extra_out
+
     def forward_decoder(self, img_feat_patches, text_embedding, cls_token):
         """
 
@@ -152,7 +184,7 @@ class CLIPCount(nn.Module):
         extra_out['text_embedding'] = text_embedding
         # add pos embed
 
-        patch_feat = img_feat_patches[:,1:,:]
+        patch_feat = img_feat_patches[:,1:,:] # [B, 196, 768]
         patch_embedding = self.patch_feat_proj(patch_feat)
         extra_out['patch_embedding'] = patch_embedding
         patch_embedding_contrast = self.patch_feat_proj_contrast(patch_feat)
@@ -160,7 +192,7 @@ class CLIPCount(nn.Module):
         x = patch_embedding
         x = x + self.patch_emb_pos_embed # [B, 196, 512]
 
-        y_ = text_embedding # [B, 1, 512]
+        y_ = text_embedding # [B, 1, 512] or [B, N, 512] if use_digital_prompt
 
 
         # apply Transformer blocks (cross-attention)
@@ -204,11 +236,14 @@ class CLIPCount(nn.Module):
                 text_embedding = self.text_encoder(text_token).float()  # [B, 1, 512]
 
         if use_digital_prompt:
-            text_embedding = text_embedding.reshape(len(text), -1, 512)
+            text_embedding = text_embedding.reshape(len(text), -1, self.clip_out_dim)
 
         cls_token, img_feat_patches = self.forward_visual_encoder(imgs, text_embedding)
-        pred_density, extra_out = self.forward_decoder(img_feat_patches, text_embedding, cls_token)  # [N, 384, 384]
-        
+        if self.use_img2img_cross:
+            pred_density, extra_out = self.forward_img2img_decoder(img_feat_patches, text_embedding, cls_token)
+        else:
+            pred_density, extra_out = self.forward_decoder(img_feat_patches, text_embedding, cls_token)  # [N, 384, 384]
+
         if return_extra:
             return pred_density, extra_out
         return pred_density
@@ -386,8 +421,12 @@ class CLIPTextTransformer(nn.Module):
 
 
 class DensityDecoder(nn.Module):
-    def __init__(self, in_dim:int, target_hw:int, use_hiearachy:bool = False) -> None:
+    def __init__(self, in_dim:int, target_hw:int, use_hiearachy:bool = False, fim_num_heads=8, mlp_ratio=4., norm_layer=nn.LayerNorm) -> None:
         super().__init__()
+        self.img2img_cross_blocks = nn.ModuleList([
+            Img2ImgCrossAttentionBlock(in_dim, fim_num_heads, mlp_ratio, qkv_bias=True, qk_scale=None,
+                                       norm_layer=norm_layer, drop=0.1, drop_path=0.1)
+            for _ in range(4)])
         # Density map regresssion module
         self.n_levels = 4 if use_hiearachy else 2
         self.target_hw = [target_hw, target_hw]
@@ -457,6 +496,36 @@ class DensityDecoder(nn.Module):
         x = einops.rearrange(x, 'n 1 h w -> n h w')
         return x
 
+    def forward_hierarchical_img2img(self, xs):
+        """
+        xs: [B,1+14*14,512], [B,1+28*28,512]
+        """
+        x0, x1 = xs[0], xs[1]
+        for blk in self.img2img_cross_blocks:
+            x0, x1 = blk(x0, x1)
+
+        x0, x1 = self.seq_2_2d(x0[:,1:,:]), self.seq_2_2d(x1[:,1:,:])
+        x = x0
+        for i in range(self.n_levels):
+            if i == 1:
+                x = x + self.pyradim_conv(x1)
+
+            x = self.convs[i](x)
+            if i < self.n_levels - 1:
+                x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
+            else:
+                x = F.interpolate(x, size=(384, 384), mode='bilinear', align_corners=False)
+        x = self.final_conv(x)
+
+        x = F.sigmoid(x)
+        x = einops.rearrange(x, 'n 1 h w -> n h w')
+        return x
+
+    def seq_2_2d(self,x):
+        n, hw, c = x.shape
+        h = w = int(math.sqrt(hw))
+        x = x.transpose(1, 2).reshape(n, c, h, w)
+        return x
 
 
 

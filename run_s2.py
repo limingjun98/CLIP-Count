@@ -5,7 +5,8 @@
 # @Github    : https://github.com/songrise
 # @Description: script to train and test CLIP-Count
 #supress torchvision warnings
-# add digital prompt contrastive loss -240210
+# add digital prompt contrastive loss -240210 s1
+# add img2img cross attention -240212 s2
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -74,7 +75,7 @@ def get_args_parser():
     parser.add_argument("--noise_text_ratio", default = 0.0, type = float, help = "ratio of noise text")
     parser.add_argument('--normalize_contrast',default=False, type = misc.str2bool, help = "whether to normalize contrastive loss")
     parser.add_argument('--contrast_pos', default = "pre", choices = ["pre", "post"], type = str, help = "Use contrastive loss before or after the interaction")
-    parser.add_argument('--contrast_pre_epoch', default = 20, type = int, help = "how many epoch to use contrastive pretraining")
+    parser.add_argument('--contrast_pre_epoch', default = 0, type = int, help = "how many epoch to use contrastive pretraining")
 
     # self supervise loss related -lmj
     parser.add_argument('--use_self_supervised', default=False, type=misc.str2bool,
@@ -85,8 +86,9 @@ def get_args_parser():
                         help="whether to resume checkpoint.If resuming from mid-epoch checkpoint, training will start from the beginning of the next epoch")
     parser.add_argument("--w_digital_contrast", default=1.0, type=float, help="weight of digital contrastive loss")
     parser.add_argument("--use_digital_contrast", default=True, type=misc.str2bool, help="whether to use digital contrasitive loss")
-    parser.add_argument('--digital_contrast_pre_epoch', default=20, type=int,
+    parser.add_argument('--digital_contrast_pre_epoch', default=0, type=int,
                         help="how many epoch to use digital contrastive pretraining")
+    parser.add_argument("--use_img2img_cross", default=True, type=misc.str2bool, help="whether to use img2img cross attention")
 
     # Optimizer parameters
     parser.add_argument('--weight_decay', type=float, default=0.05,
@@ -156,6 +158,7 @@ class Model(LightningModule):
                         use_fim = self.args.use_fim,
                         use_mixed_fim = self.args.use_mixed_fim,
                         unfreeze_vit = self.args.unfreeze_vit,
+                        use_img2img_cross = self.args.use_img2img_cross
                         )
         self.loss = F.mse_loss
         self.contrastive_loss = ContrastiveLoss(0.07, self.args.noise_text_ratio, self.args.normalize_contrast)
@@ -235,7 +238,7 @@ class Model(LightningModule):
         if not self.args.use_contrast:
             prompt = [f"a photo of {p}" for p in prompt]
 
-        output = self.model(samples, prompt)
+        output = self.model(samples, prompt, use_digital_prompt = self.args.use_digital_contrast)
 
         
         # Update information of MAE and RMSE

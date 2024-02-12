@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from itertools import repeat
@@ -125,6 +126,38 @@ class CrossAttention(nn.Module):
         x = self.proj_drop(x)
         return x
 
+
+class Img2ImgCrossAttention(nn.Module):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
+        super().__init__()
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        # NOTE scale factor was wrong in my original version, can set manually to be compat with prev weights
+        self.scale = qk_scale or head_dim ** -0.5
+
+        self.wq = nn.Linear(dim, dim, bias=qkv_bias)
+        self.wk = nn.Linear(dim, dim, bias=qkv_bias)
+        self.wv = nn.Linear(dim, dim, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, x):
+
+        B, N, C = x.shape
+        q = self.wq(x[:, 0:1, ...]).reshape(B, 1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)  # B1C -> B1H(C/H) -> BH1(C/H)
+        k = self.wk(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)  # BNC -> BNH(C/H) -> BHN(C/H)
+        v = self.wv(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)  # BNC -> BNH(C/H) -> BHN(C/H)
+
+        attn = (q @ k.transpose(-2, -1)) * self.scale  # BH1(C/H) @ BH(C/H)N -> BH1N
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B, 1, C)   # (BH1N @ BHN(C/H)) -> BH1(C/H) -> B1H(C/H) -> B1C
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
 class CrossAttentionBlock(nn.Module):
 
     def __init__(
@@ -194,12 +227,27 @@ class ConvCrossAttentionBlock(nn.Module):
         else:
             self.interpolate_layer = nn.Upsample(scale_factor=resolution, mode='bilinear', align_corners=False)
 
-    def forward(self, x, y):
+    def forward(self, x, y, with_cls_token = False):
+        """
+        Parameters
+        ----------
+        with_cls_token: bool
+            whether the input_x includes the cls_token. If true:197, else 196
+        """
         if self.resolution != 1:
-            x = self.seq_to_2d(x)
-            x = x + self.act0(self.conv0(x))
-            x = self.interpolate_layer(x)
-            x = self._2d_to_seq(x)
+            if with_cls_token:
+                cls_token = x[:,0:1,:]
+                x = x[:,1:,:]
+                x = self.seq_to_2d(x)
+                x = x + self.act0(self.conv0(x))
+                x = self.interpolate_layer(x)
+                x = self._2d_to_seq(x)
+                x = torch.cat([cls_token, x], dim=1)
+            else:
+                x = self.seq_to_2d(x)
+                x = x + self.act0(self.conv0(x))
+                x = self.interpolate_layer(x)
+                x = self._2d_to_seq(x)
         x = x + self.drop_path0(self.selfattn(self.norm0(x)))
         x = x + self.drop_path1(self.attn(self.norm1(x), y))
         x = x + self.drop_path2(self.mlp(self.norm2(x)))
@@ -215,3 +263,64 @@ class ConvCrossAttentionBlock(nn.Module):
         n, c, h, w = x.shape
         x = x.reshape(n, c, h*w).transpose(1, 2)
         return x
+
+
+class Img2ImgCrossAttentionBlock(nn.Module):
+
+    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, has_mlp=True):
+        super().__init__()
+
+        self.norm0a = norm_layer(dim)
+        self.selfattn0a = Attention(
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+        self.drop_path0a = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+        self.norm0b = norm_layer(dim)
+        self.selfattn0b = Attention(
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+        self.drop_path0b = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+        self.norm1a = norm_layer(dim)
+        self.norm1b = norm_layer(dim)
+        self.attn_a = Img2ImgCrossAttention(
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+        self.attn_b = Img2ImgCrossAttention(
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+        # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
+        self.drop_path1a = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.drop_path1b = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.drop_path2a = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.drop_path2b = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.has_mlp = has_mlp
+        if has_mlp:
+            self.norm2a = norm_layer(dim)
+            self.norm2b = norm_layer(dim)
+            mlp_hidden_dim = int(dim * mlp_ratio)
+            self.mlp_a = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+            self.mlp_b = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+
+    def forward(self, xa, xb):
+        """
+        xa: [B,1+a*a,512], xb: [B,1+b*b,512]
+        """
+
+        xa = xa + self.drop_path0a(self.selfattn0a(self.norm0a(xa)))
+        xb = xb + self.drop_path0b(self.selfattn0b(self.norm0b(xb)))
+
+        xa_cls_token = xa[:, 0:1, ...]
+        xa_cat = torch.cat([xa_cls_token, xb[:, 1:, ...]], dim=1)
+        xa_cls_token = xa_cat[:, 0:1, ...] + self.drop_path1a(self.attn_a(self.norm1a(xa_cat)))
+        if self.has_mlp:
+            xa_cls_token = xa_cls_token + self.drop_path2a(self.mlp_a(self.norm2a(xa_cls_token)))
+
+        xb_cls_token = xb[:, 0:1, ...]
+        xb_cat = torch.cat([xb_cls_token, xa[:, 1:, ...]], dim=1)
+        xb_cls_token = xb_cat[:, 0:1, ...] + self.drop_path1b(self.attn_b(self.norm1b(xb_cat)))
+        if self.has_mlp:
+            xb_cls_token = xb_cls_token + self.drop_path2b(self.mlp_b(self.norm2b(xb_cls_token)))
+
+        xa = torch.cat([xa_cls_token, xa[:, 1:, ...]], dim=1)
+        xb = torch.cat([xb_cls_token, xb[:, 1:, ...]], dim=1)
+
+        return xa, xb

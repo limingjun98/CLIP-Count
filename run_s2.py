@@ -75,7 +75,7 @@ def get_args_parser():
     parser.add_argument("--noise_text_ratio", default = 0.0, type = float, help = "ratio of noise text")
     parser.add_argument('--normalize_contrast',default=False, type = misc.str2bool, help = "whether to normalize contrastive loss")
     parser.add_argument('--contrast_pos', default = "pre", choices = ["pre", "post"], type = str, help = "Use contrastive loss before or after the interaction")
-    parser.add_argument('--contrast_pre_epoch', default = 0, type = int, help = "how many epoch to use contrastive pretraining")
+    parser.add_argument('--contrast_pre_epoch', default = 20, type = int, help = "how many epoch to use contrastive pretraining")
 
     # self supervise loss related -lmj
     parser.add_argument('--use_self_supervised', default=False, type=misc.str2bool,
@@ -86,7 +86,7 @@ def get_args_parser():
                         help="whether to resume checkpoint.If resuming from mid-epoch checkpoint, training will start from the beginning of the next epoch")
     parser.add_argument("--w_digital_contrast", default=1.0, type=float, help="weight of digital contrastive loss")
     parser.add_argument("--use_digital_contrast", default=True, type=misc.str2bool, help="whether to use digital contrasitive loss")
-    parser.add_argument('--digital_contrast_pre_epoch', default=0, type=int,
+    parser.add_argument('--digital_contrast_pre_epoch', default=30, type=int,
                         help="how many epoch to use digital contrastive pretraining")
     parser.add_argument("--use_img2img_cross", default=True, type=misc.str2bool, help="whether to use img2img cross attention")
 

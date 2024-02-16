@@ -27,7 +27,8 @@ class CLIPCount(nn.Module):
                  use_fim:bool = True, 
                  use_mixed_fim:bool=False, 
                  unfreeze_vit:bool=False,
-                 use_img2img_cross:bool=False):
+                 use_img2img_cross:bool=False,
+                 img2img_layer_depth:int = 4,):
         """
         The CLIP-Count model   
         Param:
@@ -130,7 +131,7 @@ class CLIPCount(nn.Module):
 
         # --------------------------------------------------------------------------
         # CNN-based density decoder
-        self.density_decoder = DensityDecoder(self.clip_out_dim, 384, use_hiearachy = use_mixed_fim, fim_num_heads=fim_num_heads, mlp_ratio=mlp_ratio, norm_layer=norm_layer)
+        self.density_decoder = DensityDecoder(self.clip_out_dim, 384, use_hiearachy = use_mixed_fim, fim_num_heads=fim_num_heads, mlp_ratio=mlp_ratio, norm_layer=norm_layer, img2img_layer_depth=img2img_layer_depth)
         # --------------------------------------------------------------------------
     
 
@@ -421,12 +422,12 @@ class CLIPTextTransformer(nn.Module):
 
 
 class DensityDecoder(nn.Module):
-    def __init__(self, in_dim:int, target_hw:int, use_hiearachy:bool = False, fim_num_heads=8, mlp_ratio=4., norm_layer=nn.LayerNorm) -> None:
+    def __init__(self, in_dim:int, target_hw:int, use_hiearachy:bool = False, fim_num_heads=8, mlp_ratio=4., norm_layer=nn.LayerNorm, img2img_layer_depth=4) -> None:
         super().__init__()
         self.img2img_cross_blocks = nn.ModuleList([
             Img2ImgCrossAttentionBlock(in_dim, fim_num_heads, mlp_ratio, qkv_bias=True, qk_scale=None,
                                        norm_layer=norm_layer, drop=0.1, drop_path=0.1)
-            for _ in range(4)])
+            for _ in range(img2img_layer_depth)])
         # Density map regresssion module
         self.n_levels = 4 if use_hiearachy else 2
         self.target_hw = [target_hw, target_hw]

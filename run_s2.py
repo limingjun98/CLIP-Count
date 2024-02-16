@@ -89,6 +89,7 @@ def get_args_parser():
     parser.add_argument('--digital_contrast_pre_epoch', default=30, type=int,
                         help="how many epoch to use digital contrastive pretraining")
     parser.add_argument("--use_img2img_cross", default=True, type=misc.str2bool, help="whether to use img2img cross attention")
+    parser.add_argument('--img2img_layer_depth', default=4, type=int, help="Number of img2img cross attention layers")
 
     # Optimizer parameters
     parser.add_argument('--weight_decay', type=float, default=0.05,
@@ -158,7 +159,8 @@ class Model(LightningModule):
                         use_fim = self.args.use_fim,
                         use_mixed_fim = self.args.use_mixed_fim,
                         unfreeze_vit = self.args.unfreeze_vit,
-                        use_img2img_cross = self.args.use_img2img_cross
+                        use_img2img_cross = self.args.use_img2img_cross,
+                        img2img_layer_depth = self.args.img2img_layer_depth
                         )
         self.loss = F.mse_loss
         self.contrastive_loss = ContrastiveLoss(0.07, self.args.noise_text_ratio, self.args.normalize_contrast)
